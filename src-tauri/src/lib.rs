@@ -71,11 +71,15 @@ pub fn run() {
                 store,
                 events,
             )?);
-            let engine = Engine::new(Engine::bundled_runtime()?);
+            let engine = Engine::new(
+                Engine::bundled_runtime()?,
+                data_dir.join("llama-server.pid"),
+            );
             let state = AppState::new(db, engine, models);
             state.connect_home_assistant(&state.settings()?.home_assistant_url);
             app.manage(state);
             forward_status(app.handle());
+            exit_on_terminate(app.handle());
 
             lifecycle::setup_tray(app)?;
             if !lifecycle::starts_hidden(std::env::args()) {
@@ -118,6 +122,25 @@ pub fn run() {
         _ => {}
     });
 }
+
+/// Logout and shutdown send SIGTERM on macOS. Quitting cleanly unloads the model.
+#[cfg(unix)]
+fn exit_on_terminate(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => {
+                terminate.recv().await;
+                app.exit(0);
+            }
+            Err(error) => log::error!("failed to listen for termination: {error}"),
+        }
+    });
+}
+
+#[cfg(not(unix))]
+fn exit_on_terminate(_: &AppHandle) {}
 
 /// Sends connection and model status changes to the frontend as they happen.
 fn forward_status(app: &AppHandle) {

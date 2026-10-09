@@ -106,7 +106,14 @@ pub async fn download(
                 chunk = body.next() => chunk,
             };
             let Some(chunk) = chunk else { break };
-            let bytes = chunk.map_err(|error| DownloadError::Interrupted(error.to_string()))?;
+            let bytes = match chunk {
+                Ok(bytes) => bytes,
+                Err(error) => {
+                    // Completes pending writes so the partial length is accurate for resuming.
+                    file.flush().await?;
+                    return Err(DownloadError::Interrupted(error.to_string()));
+                }
+            };
             offset += bytes.len() as u64;
             if offset > model.size {
                 drop(file);
@@ -315,7 +322,9 @@ mod tests {
         let first = fetch(&model, &temp.store).await;
         assert!(matches!(first, Err(DownloadError::Interrupted(_))));
         assert!(!temp.store.is_installed(&model));
-        assert_eq!(temp.store.partial_len(&model), 70_000);
+        // Bytes still in flight when the connection drops are lost; the rest is kept.
+        let kept = temp.store.partial_len(&model);
+        assert!(kept > 0 && kept <= 70_000, "kept {kept} bytes");
 
         fetch(&model, &temp.store).await.unwrap();
         assert!(temp.store.is_installed(&model));

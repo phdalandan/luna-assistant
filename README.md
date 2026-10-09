@@ -4,14 +4,16 @@ Luna is an open-source, privacy-first voice assistant for [Home Assistant](https
 
 Say "It's too bright in the living room" or "Turn off everything downstairs except the hallway light" and Luna works out which devices you mean, checks the action is allowed, carries it out, and confirms the result.
 
-> **Status:** early development. Stage 1 (desktop shell, tray, settings) is in place. Home Assistant control, the AI pipeline, and voice are not implemented yet.
+> **Status:** early development. The text assistant works with Home Assistant and a built-in local AI engine. Voice is not implemented yet.
 
 ## Requirements
 
-- Windows 10/11 (x64) or macOS 11+ (Apple Silicon)
+- Windows 10/11 (x64, AVX2 processor) or macOS 11+ (Apple Silicon)
 - 16 GB of memory
-- [Ollama](https://ollama.com) with a local model, for example `ollama pull qwen3:8b`
-- A Home Assistant instance on your network
+- About 6 GB of free disk space for the recommended model
+- Home Assistant 2024.4 or later on your network
+
+Nothing else needs to be installed. Luna includes its own AI engine ([llama.cpp](https://github.com/ggml-org/llama.cpp)).
 
 ## Install
 
@@ -22,25 +24,38 @@ Development builds are unsigned:
 - **macOS:** Gatekeeper blocks unsigned, unnotarised apps. Right-click Luna in Applications and choose **Open**, or run `xattr -dr com.apple.quarantine /Applications/Luna.app`.
 - **Windows:** SmartScreen shows "Windows protected your PC". Choose **More info**, then **Run anyway**.
 
-## Configuration
+## First run
 
-Open Luna from the tray or menu bar and go to **Settings**:
+1. Open Luna from the tray or menu bar.
+2. Download the recommended model (Qwen3 8B, 5.0 GB). Nothing downloads until you choose to.
+3. Select **Use** once it is installed.
+4. In **Settings**, pick your Home Assistant instance (found automatically on your network) or enter its address, then paste a [long-lived access token](https://www.home-assistant.io/docs/authentication/#your-account-profile).
 
-- **Home Assistant address**, for example `http://homeassistant.local:8123`
-- **Ollama address**, default `http://127.0.0.1:11434`
-- **Model**, any model installed in Ollama, for example `qwen3:8b` or `gemma3:12b`
-- **Context length**
-- **Launch at login**
+## AI models
 
-Settings are stored locally in SQLite in the app data directory. Access tokens will be stored in the operating system's credential store.
+| Model       | Download | Notes                                                 |
+| ----------- | -------- | ----------------------------------------------------- |
+| Qwen3 8B    | 5.0 GB   | Recommended for everyday commands.                    |
+| Gemma 3 12B | 7.3 GB   | Uses more memory and may run slowly on 16 GB devices. |
+
+Both use Q4_K_M quantisation and download from Hugging Face. Files are verified with SHA-256 and stored in Luna's app data folder (`~/Library/Application Support/io.github.phdalandan.luna/models` on macOS, `%APPDATA%\io.github.phdalandan.luna\models` on Windows). Downloads can be paused and resumed. Gemma 3 is subject to the [Gemma Terms of Use](https://ai.google.dev/gemma/terms).
+
+The model loads when you first ask something and unloads after 5 minutes of inactivity. Context length defaults to 4,096 tokens and can be raised in Settings.
+
+## Privacy
+
+Requests, Home Assistant data, and AI processing stay on your computer. Luna connects to the internet only to download a model you chose. The Home Assistant token is stored in the macOS Keychain or Windows Credential Manager.
 
 Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tray menu to exit.
 
 ## Development
 
-Prerequisites: Node.js 22, Rust (stable), and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+Prerequisites: Node.js 22, Rust (stable), CMake, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+
+Build the bundled llama.cpp server once (and again whenever `scripts/build-llama-server.sh` changes):
 
 ```sh
+scripts/build-llama-server.sh
 npm ci
 npm run tauri dev
 ```
@@ -52,7 +67,11 @@ npm run format:check && npm run lint && npm run typecheck && npm test
 cd src-tauri && cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test
 ```
 
-`cargo test` also regenerates the TypeScript types in `src/bindings`.
+`cargo test` also regenerates the TypeScript types in `src/bindings`. Tests that need a real model are ignored by default:
+
+```sh
+LUNA_TEST_MODEL=/path/to/Qwen3-8B-Q4_K_M.gguf cargo test -- --ignored
+```
 
 ## Build
 
@@ -62,7 +81,7 @@ Local installer for the current platform:
 npm run tauri build
 ```
 
-CI builds run only when started manually: **Actions > Build > Run workflow**. Enter a version (`MAJOR.MINOR.PATCH`) and optionally enable **Create a draft GitHub Release**. Artifacts are named `Luna-<version>-macos-arm64.dmg` and `Luna-<version>-windows-x64-setup.exe`.
+CI builds run only when started manually: **Actions > Build > Run workflow**. Each run builds the pinned llama.cpp server for its platform (cached between runs) and bundles it into the installer. No model weights are bundled. Enter a version (`MAJOR.MINOR.PATCH`) and optionally enable **Create a draft GitHub Release**. Artifacts are named `Luna-<version>-macos-arm64.dmg` and `Luna-<version>-windows-x64-setup.exe`.
 
 Release creation makes a draft release targeting the exact commit that was built. Review it and publish it manually. Existing releases and tags are never overwritten.
 

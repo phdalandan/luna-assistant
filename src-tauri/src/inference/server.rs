@@ -61,6 +61,9 @@ impl Server {
         let mut child = command
             .spawn()
             .map_err(|error| InferenceError::LoadFailed(format!("spawn failed: {error}")))?;
+        if let Err(error) = super::process::bind_to_luna(&child) {
+            log::error!("llama-server may outlive Luna: {error}");
+        }
 
         let output = Arc::new(Mutex::new(VecDeque::new()));
         if let Some(stderr) = child.stderr.take() {
@@ -93,6 +96,10 @@ impl Server {
             spec.context_length
         );
         Ok(server)
+    }
+
+    pub fn pid(&self) -> Option<u32> {
+        self.child.id()
     }
 
     pub fn serves(&self, spec: &ModelSpec) -> bool {
