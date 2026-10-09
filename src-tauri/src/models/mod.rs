@@ -435,10 +435,10 @@ mod tests {
         let manager =
             ModelManager::new(catalog::models().to_vec(), temp.store.clone(), events).unwrap();
         let models = manager.list(Some("qwen3-8b"), 4096);
-        assert_eq!(models.len(), 2);
+        assert_eq!(models.len(), 3);
         assert!(models.iter().all(|model| !model.installed && !model.active));
         assert!(models[0].recommended);
-        assert!(models[1].warning.is_some());
+        assert!(models[2].warning.is_some());
     }
 
     #[tokio::test]

@@ -589,7 +589,9 @@ async fn reading_states_takes_a_second_pass() {
         tool_call("get_states", json!({"target": {"areas": ["bedroom"]}})),
         text("It's 18.2°C in the bedroom."),
     ]);
-    let reply = conversation.ask(&model, "How warm is the bedroom?").await;
+    let reply = conversation
+        .ask(&model, "Is it colder upstairs than in the hallway?")
+        .await;
     assert_eq!(reply.text, "It's 18.2°C in the bedroom.");
     assert_eq!(reply.metrics.passes, 2);
     assert!(model.last_message().content.contains("18.2°C"));
@@ -1093,4 +1095,240 @@ async fn prompt_cache_with_real_model() {
     engine.unload().await;
     let saved: Vec<_> = std::fs::read_dir(&cache).unwrap().flatten().collect();
     assert_eq!(saved.len(), 1);
+}
+
+#[tokio::test]
+async fn follow_up_questions_reuse_the_previous_question_without_the_model() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::unused();
+    conversation.ask(&model, "Is the porch light on?").await;
+    assert_eq!(
+        conversation.ask(&model, "What about the AC?").await.text,
+        "Thermostat is set to heat."
+    );
+}
+
+#[tokio::test]
+async fn follow_ups_after_other_turns_go_to_the_model() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::new(vec![text("The AC is set to heat.")]);
+    conversation
+        .ask(&ScriptedModel::unused(), "What time is it?")
+        .await;
+    let reply = conversation.ask(&model, "What about the AC?").await;
+    assert_eq!(reply.metrics.route, Route::Model);
+}
+
+#[tokio::test]
+async fn answers_to_which_one_finish_the_original_request_without_the_model() {
+    let conversation = Conversation::new();
+    conversation.set(
+        "light.back_porch",
+        "off",
+        json!({"friendly_name": "Back Porch"}),
+    );
+    let model = ScriptedModel::unused();
+    conversation.ask(&model, "Is the porch light on?").await;
+    assert_eq!(
+        conversation.ask(&model, "the first one").await.text,
+        "Back Porch is off."
+    );
+    assert_eq!(conversation.state("light.back_porch"), "off");
+
+    conversation.ask(&model, "Turn on the porch light").await;
+    conversation.ask(&model, "front").await;
+    assert_eq!(conversation.state("light.front_porch"), "on");
+    assert_eq!(conversation.state("light.back_porch"), "off");
+}
+
+#[tokio::test]
+async fn a_device_word_prefers_devices_of_that_kind() {
+    let conversation = Conversation::new();
+    conversation.set(
+        "switch.thermostat_display_ac",
+        "on",
+        json!({"friendly_name": "AC Display light"}),
+    );
+    let reply = conversation
+        .ask(&ScriptedModel::unused(), "Is the AC on?")
+        .await;
+    assert_eq!(reply.text, "Thermostat is set to heat.");
+}
+
+#[tokio::test]
+async fn exclusions_the_user_never_asked_for_are_rejected() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::new(vec![
+        tool_call(
+            "control",
+            json!({"action": "turn_on", "target": {"domains": ["light"], "exclude_entities": ["light.hallway"]}}),
+        ),
+        text("Which lights?"),
+    ]);
+    let api = conversation.api();
+    let reply = conversation
+        .ask_with(&model, &api, "Brighten up the place")
+        .await;
+    assert_eq!(reply.text, "Which lights?");
+    assert!(api.calls.lock().unwrap().is_empty());
+}
+
+/// Everyday phrasings that must never wait on the model. Each case is one conversation.
+#[tokio::test]
+async fn everyday_requests_are_answered_without_the_model() {
+    let single: &[&str] = &[
+        "turn on the porch light",
+        "turn the porch light on",
+        "porch light on",
+        "porch light off",
+        "switch off the kitchen light",
+        "can you turn off the kitchen light",
+        "could you please turn off the kitchen light",
+        "please turn off the kitchen light",
+        "turn off kitchen light please",
+        "kitchen light off please",
+        "turn off the light in the kitchen",
+        "turn the kitchen lights off",
+        "shut the garage",
+        "close the garage door",
+        "open the blinds",
+        "is the garage open",
+        "is the garage door closed?",
+        "is the front door locked",
+        "is the porch light on?",
+        "are the kitchen lights on",
+        "is the tv on",
+        "check the garage",
+        "garage status",
+        "what's the status of the front door",
+        "what is the temperature in the bedroom",
+        "how warm is the bedroom",
+        "bedroom temperature",
+        "what's the temperature on the thermostat",
+        "what's the thermostat set to",
+        "set the thermostat to 21",
+        "set the hallway light to 50%",
+        "dim the hallway light to 30%",
+        "make the hallway light 40%",
+        "set hallway brightness to 60",
+        "what time is it",
+        "lock the front door",
+        "unlock the front door",
+        "thanks",
+        "thank you luna",
+    ];
+    let conversations: &[&[&str]] = &[
+        &["is the porch light on", "turn it on"],
+        &["turn on the porch light", "turn it off"],
+        &["turn on the porch light", "revert that"],
+        &["turn on the porch light", "undo"],
+        &["turn on the porch light", "sorry. turn it back off"],
+        &["turn on the porch light", "turn it back off please"],
+        &["turn on the porch light", "turn it on again"],
+        &["is the porch light on", "what about the kitchen light"],
+        &["is the porch light on", "and the kitchen?"],
+        &["is the porch light on", "how about the hallway"],
+        &["is the porch light on", "are you sure"],
+        &["is the porch light on", "it's on I think"],
+        &["is the porch light on", "no it is off"],
+        &["set the thermostat to 21", "set it back to 20"],
+        &["set the thermostat to 21", "make it 22"],
+        &["set the thermostat to 21", "actually 22"],
+        &["turn off the kitchen light", "and the hallway"],
+        &["turn off the kitchen light", "the hallway too"],
+    ];
+    let with_two_porches: &[&[&str]] = &[
+        &["turn on the porch light", "the front one"],
+        &["turn on the porch light", "front porch"],
+        &["turn on the porch light", "first one"],
+        &["turn on the porch light", "both"],
+        &["is the porch light on", "the second one"],
+    ];
+
+    let mut cases: Vec<(bool, Vec<&str>)> = single.iter().map(|r| (false, vec![*r])).collect();
+    cases.extend(conversations.iter().map(|turns| (false, turns.to_vec())));
+    cases.extend(with_two_porches.iter().map(|turns| (true, turns.to_vec())));
+
+    let mut failures = Vec::new();
+    for (two_porches, turns) in cases {
+        let conversation = Conversation::new();
+        conversation.set(
+            "light.front_porch",
+            "off",
+            json!({"friendly_name": "Front Porch"}),
+        );
+        if two_porches {
+            conversation.set(
+                "light.back_porch",
+                "off",
+                json!({"friendly_name": "Back Porch"}),
+            );
+        }
+        for turn in &turns {
+            let model = ScriptedModel::new(vec![text("model")]);
+            let reply = conversation.ask(&model, turn).await;
+            if reply.metrics.route != Route::Direct {
+                failures.push(format!("{turns:?} at {turn:?}"));
+                break;
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "sent to the model:\n{}",
+        failures.join("\n")
+    );
+}
+
+#[tokio::test]
+async fn temperature_questions_read_the_temperature() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::unused();
+    assert_eq!(
+        conversation
+            .ask(&model, "How warm is the bedroom?")
+            .await
+            .text,
+        "Bedroom temperature is 18.2°C."
+    );
+    assert_eq!(
+        conversation
+            .ask(&model, "what's the temperature on the thermostat")
+            .await
+            .text,
+        "Thermostat is 19.5°, set to 20°."
+    );
+}
+
+#[tokio::test]
+async fn follow_ups_repeat_a_command_and_both_picks_every_choice() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::unused();
+    conversation.ask(&model, "turn off the kitchen light").await;
+    conversation.ask(&model, "the hallway too").await;
+    assert_eq!(conversation.state("light.hallway"), "off");
+
+    conversation.set(
+        "light.front_porch",
+        "off",
+        json!({"friendly_name": "Front Porch"}),
+    );
+    conversation.set(
+        "light.back_porch",
+        "off",
+        json!({"friendly_name": "Back Porch"}),
+    );
+    conversation.ask(&model, "turn on the porch light").await;
+    conversation.ask(&model, "both").await;
+    assert_eq!(conversation.state("light.front_porch"), "on");
+    assert_eq!(conversation.state("light.back_porch"), "on");
+}
+
+#[tokio::test]
+async fn blinds_never_match_the_garage_door() {
+    let conversation = Conversation::new();
+    conversation
+        .ask(&ScriptedModel::unused(), "open the blinds")
+        .await;
+    assert_eq!(conversation.state("cover.garage_door"), "closed");
 }

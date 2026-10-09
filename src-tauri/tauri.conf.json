@@ -4,8 +4,8 @@
   "version": "0.1.0",
   "identifier": "io.github.phdalandan.luna",
   "build": {
-    "beforeDevCommand": "npm run runtime && npm run dev",
-    "devUrl": "http://localhost:1420",
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1430",
     "beforeBuildCommand": "npm run runtime && npm run build",
     "frontendDist": "../dist"
   },

@@ -2,10 +2,10 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
 use serde::Serialize;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::assistant::{self, EngineChat, Home, Session};
+use crate::assistant::{self, CONVERSATION_LIFETIME, EngineChat, Home, Session};
 use crate::credentials::{self, AccessToken};
 use crate::error::{AppError, CommandError};
 use crate::history::{self, Interaction};
@@ -199,6 +199,8 @@ pub async fn select_model(state: State<'_, AppState>, id: String) -> Result<(), 
     Ok(state.engine.load(&spec).await?)
 }
 
+const HOME_ASSISTANT_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// Called when Luna's window is shown, so the model is ready before the user asks.
 /// Failures are logged; the model status already tells the user if loading failed.
 #[tauri::command]
@@ -214,6 +216,24 @@ pub async fn prepare_assistant(state: State<'_, AppState>) -> Result<(), Command
             return Ok(());
         }
     };
+    // The shared prompt holds the home layout, so it is prepared only once that is loaded.
+    let mut status = state.home_assistant.subscribe_status();
+    let settled = tokio::time::timeout(
+        HOME_ASSISTANT_WAIT,
+        status.wait_for(|status| {
+            !matches!(
+                status,
+                ConnectionStatus::Connecting | ConnectionStatus::Reconnecting
+            )
+        }),
+    )
+    .await
+    .ok()
+    .and_then(|result| result.ok().map(|status| *status));
+    if settled != Some(ConnectionStatus::Connected) {
+        log::info!("assistant not prepared: Home Assistant is not connected");
+        return Ok(());
+    }
     let started = std::time::Instant::now();
     match assistant::warm_up(&state.engine, &spec, state.home()).await {
         Ok(Warmup::AlreadyReady) => {}
@@ -227,7 +247,12 @@ pub async fn prepare_assistant(state: State<'_, AppState>) -> Result<(), Command
 }
 
 #[tauri::command]
-pub async fn ask(state: State<'_, AppState>, text: String) -> Result<Interaction, CommandError> {
+pub async fn ask(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    text: String,
+) -> Result<Interaction, CommandError> {
+    end_conversation_when_idle(&app);
     let text = text.trim().to_owned();
     let settings = state.settings()?;
     let spec = state.model_spec(&settings)?;
@@ -257,7 +282,26 @@ pub async fn ask(state: State<'_, AppState>, text: String) -> Result<Interaction
             .session
             .await_confirmation(interaction.id, reply.confirmation);
     }
+    end_conversation_when_idle(&app);
     Ok(interaction)
+}
+
+/// Clears the conversation once no request follows within `CONVERSATION_LIFETIME`.
+fn end_conversation_when_idle(app: &AppHandle) {
+    let activity = app.state::<AppState>().session.touch();
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(CONVERSATION_LIFETIME).await;
+        let state = app.state::<AppState>();
+        if !state.session.idle_since(activity) {
+            return;
+        }
+        state.session.forget();
+        match history::clear(&state.db()) {
+            Ok(()) => crate::emit(&app, crate::CONVERSATION_EVENT, ()),
+            Err(error) => log::error!("failed to clear the conversation: {error}"),
+        }
+    });
 }
 
 #[tauri::command]
@@ -267,10 +311,12 @@ pub fn cancel_request(state: State<'_, AppState>) {
 
 #[tauri::command]
 pub async fn confirm_action(
+    app: AppHandle,
     state: State<'_, AppState>,
     id: i64,
     confirmed: bool,
 ) -> Result<Interaction, CommandError> {
+    end_conversation_when_idle(&app);
     let text = match (state.session.take_confirmation(id), confirmed) {
         (Ok(requests), true) => {
             let mut memory = state.session.memory();

@@ -21,14 +21,13 @@ use crate::inference::{
     ChatMessage, Completion, Engine, FunctionCall, InferenceError, ModelSpec, Role, Timings,
     ToolCall, Warmup,
 };
+pub use session::{CONVERSATION_LIFETIME, Memory, Session};
 use session::{MAX_REFERENCED, Turn};
-pub use session::{Memory, Session};
 use tools::ToolRequest;
 
 const MAX_STEPS: usize = 4;
 const OUT_OF_SCOPE: &str = "I can only help with your home.";
 const HISTORY_TURNS: usize = 3;
-const HISTORY_WINDOW_MS: i64 = 10 * 60 * 1000;
 
 const INSTRUCTIONS: &str = "You are Luna, the voice assistant for one Home Assistant home. \
 You help only with this home: its devices, sensors, rooms, and their states. \
@@ -38,10 +37,10 @@ For questions unrelated to the home, reply exactly: I can only help with your ho
 Rules:
 - Use control to change devices. Use get_states for states not listed in the request context.
 - The request context shows the true current states. Never say something changed unless control changed it in this turn. \
-If the user says something did not happen, check the current state and call control again.
+If the user says an action did not work, call control again. If the user only states or disputes a state, report the current state and change nothing.
 - Only use floor, area, and entity IDs from the home layout, the request context, or tool results. Never invent IDs or devices.
 - For everything in a place, target that area or floor. Add domains when the request is about one kind of device. \
-For exceptions, use one control call with exclude_entities or exclude_areas, never a second call that reverses the first.
+Only when the user names an exception, use one control call with exclude_entities or exclude_areas, never a second call that reverses the first.
 - Examples: \"turn off everything downstairs except the hallway light\" is control turn_off with target {\"floors\": [\"downstairs\"], \"exclude_entities\": [\"light.hallway\"]}. \
 \"It's too bright in the living room\" is control set_brightness with target {\"areas\": [\"living_room\"], \"domains\": [\"light\"]} and a lower value.
 - For routines like going to bed, act on the obvious devices in the request context, or ask one short question if unsure.
@@ -175,6 +174,8 @@ pub async fn respond<A: HomeApi>(
     let started = Instant::now();
     let mut reply = match direct::handle(&home, memory, request).await {
         Some(reply) => reply,
+        // Without Home Assistant the model has nothing to act on.
+        None if !home.connected => Reply::direct(direct::NOT_CONNECTED),
         None => ask_model(model, &home, history, memory, request, cancel).await?,
     };
     reply.metrics.total = started.elapsed();
@@ -288,7 +289,7 @@ async fn ask_model<A: HomeApi>(
         }
         let mut needs_model = false;
         for call in &message.tool_calls {
-            let content = match run_tool(&call.function, home, &mut turn).await {
+            let content = match run_tool(&call.function, home, request, &mut turn).await {
                 ToolOutcome::Text(text) => {
                     needs_model = true;
                     text
@@ -396,6 +397,7 @@ enum ToolOutcome {
 async fn run_tool<A: HomeApi>(
     call: &FunctionCall,
     home: &Home<'_, A>,
+    user_request: &str,
     turn: &mut Turn,
 ) -> ToolOutcome {
     let request = match tools::parse(call) {
@@ -405,6 +407,18 @@ async fn run_tool<A: HomeApi>(
             return ToolOutcome::Text(error);
         }
     };
+    let target = match &request {
+        ToolRequest::GetStates(target) => target,
+        ToolRequest::Control(control) => &control.target,
+    };
+    let excludes = !target.exclude_entities.is_empty() || !target.exclude_areas.is_empty();
+    if excludes && !names_an_exception(user_request) {
+        log::info!("tool call rejected: exclusions without an exception in the request");
+        return ToolOutcome::Text(
+            "Rejected, nothing changed: the user named no exception. Remove exclude_entities and exclude_areas."
+                .into(),
+        );
+    }
     if !home.connected {
         return ToolOutcome::Text(
             "Home Assistant is not connected. Tell the user to check the connection in Settings."
@@ -458,19 +472,34 @@ async fn run_tool<A: HomeApi>(
     }
 }
 
+/// Exclusions are only valid when the user asked for one, as in "everything except the hallway".
+fn names_an_exception(request: &str) -> bool {
+    const EXCEPTION_WORDS: &[&str] = &[
+        "except",
+        "but",
+        "not",
+        "without",
+        "besides",
+        "excluding",
+        "other",
+        "apart",
+        "leave",
+        "keep",
+        "skip",
+    ];
+    request
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| EXCEPTION_WORDS.contains(&word))
+}
+
 /// Instructions and the home layout. Identical across requests so the model reuses its cache.
 fn system_prompt<A>(home: &Home<'_, A>) -> String {
-    if !home.connected {
-        return format!("{INSTRUCTIONS}\n\nHome Assistant is not connected.");
-    }
     let layout = context::layout(&home.cache.read());
     format!("{INSTRUCTIONS}\n\nHome layout:\n{layout}")
 }
 
 fn user_prompt<A>(home: &Home<'_, A>, memory: &Memory, request: &str) -> String {
-    if !home.connected {
-        return request.to_owned();
-    }
     let snapshot = home.cache.read();
     let mentions_time = request
         .to_lowercase()
@@ -486,7 +515,7 @@ fn user_prompt<A>(home: &Home<'_, A>, memory: &Memory, request: &str) -> String 
 
 /// Recent turns as plain text. Facts about devices come from the request context instead.
 fn history_messages(history: &[Interaction]) -> Vec<ChatMessage> {
-    let cutoff = now_millis() - HISTORY_WINDOW_MS;
+    let cutoff = now_millis() - session::CONVERSATION_LIFETIME.as_millis() as i64;
     let recent: Vec<&Interaction> = history
         .iter()
         .filter(|interaction| {

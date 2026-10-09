@@ -1,15 +1,16 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use tokio_util::sync::CancellationToken;
 
 use super::AssistantError;
-use crate::actions::ControlRequest;
+use crate::actions::{Action, ControlRequest};
 use crate::home_assistant::model::Entity;
 
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
-/// Follow-ups like "revert that" only refer to recent turns.
-const MEMORY_WINDOW: Duration = Duration::from_secs(10 * 60);
+/// A conversation ends after this long without a request. Device states are cached separately.
+pub const CONVERSATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
 pub const MAX_REFERENCED: usize = 10;
 
 /// What the conversation is about, kept in Rust rather than inferred from chat text.
@@ -19,6 +20,24 @@ pub struct Memory {
     pub referenced: Vec<Reference>,
     /// States from before the last executed action, so it can be undone.
     pub last_action: Vec<Entity>,
+    /// The previous request when it was handled directly, so "and the hallway" can repeat it.
+    pub last_request: Option<Pending>,
+    /// The request waiting on "Which one?", with the choices in the order they were offered.
+    pub choice: Option<Choice>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Choice {
+    pub ids: Vec<String>,
+    pub pending: Pending,
+}
+
+/// What to do with the device the user picks.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pending {
+    Query(Vec<&'static str>),
+    Control(Action),
+    Set(f64),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -63,6 +82,7 @@ pub struct Session {
     active: Mutex<Option<CancellationToken>>,
     pending: Mutex<Option<PendingConfirmation>>,
     memory: Mutex<Option<(Memory, Instant)>>,
+    activity: AtomicU64,
 }
 
 struct PendingConfirmation {
@@ -120,7 +140,7 @@ impl Session {
     /// The conversation memory, or an empty one if the conversation went quiet.
     pub fn memory(&self) -> Memory {
         match lock(&self.memory).as_ref() {
-            Some((memory, updated)) if updated.elapsed() < MEMORY_WINDOW => memory.clone(),
+            Some((memory, updated)) if updated.elapsed() < CONVERSATION_LIFETIME => memory.clone(),
             _ => Memory::default(),
         }
     }
@@ -131,6 +151,15 @@ impl Session {
 
     pub fn forget(&self) {
         lock(&self.memory).take();
+    }
+
+    /// Records activity and returns its number, for checking later whether anything followed.
+    pub fn touch(&self) -> u64 {
+        self.activity.fetch_add(1, Ordering::SeqCst) + 1
+    }
+
+    pub fn idle_since(&self, activity: u64) -> bool {
+        self.activity.load(Ordering::SeqCst) == activity
     }
 }
 
@@ -188,5 +217,15 @@ mod tests {
         assert_eq!(session.memory(), memory);
         session.forget();
         assert_eq!(session.memory(), Memory::default());
+    }
+
+    #[test]
+    fn later_activity_means_the_session_is_not_idle() {
+        let session = Session::default();
+        let first = session.touch();
+        assert!(session.idle_since(first));
+        let second = session.touch();
+        assert!(!session.idle_since(first));
+        assert!(session.idle_since(second));
     }
 }

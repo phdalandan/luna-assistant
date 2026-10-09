@@ -29,7 +29,7 @@ pub struct Selection<'a> {
 
 /// Resolves a target to entities. Exclusions are applied here, before anything is planned.
 pub fn select<'a>(home: &'a Home, target: &Target) -> Result<Selection<'a>, ResolveError> {
-    check_references(home, target)?;
+    let target = &canonical(home, target)?;
     let has_location = target.everywhere || !target.floors.is_empty() || !target.areas.is_empty();
     if !has_location && target.entities.is_empty() && target.domains.is_empty() {
         return Err(ResolveError::EmptyTarget);
@@ -70,19 +70,36 @@ pub fn select<'a>(home: &'a Home, target: &Target) -> Result<Selection<'a>, Reso
     })
 }
 
-fn check_references(home: &Home, target: &Target) -> Result<(), ResolveError> {
-    if let Some(id) = target.floors.iter().find(|id| home.floor(id).is_none()) {
-        return Err(ResolveError::UnknownFloor(id.clone()));
-    }
-    let mut areas = target.areas.iter().chain(&target.exclude_areas);
-    if let Some(id) = areas.find(|id| home.area(id).is_none()) {
-        return Err(ResolveError::UnknownArea(id.clone()));
-    }
+/// Checks every reference and replaces area and floor names with their IDs.
+fn canonical(home: &Home, target: &Target) -> Result<Target, ResolveError> {
+    let floors = |ids: &[String]| -> Result<Vec<String>, ResolveError> {
+        ids.iter()
+            .map(|id| {
+                home.find_floor(id)
+                    .map(|floor| floor.id.clone())
+                    .ok_or_else(|| ResolveError::UnknownFloor(id.clone()))
+            })
+            .collect()
+    };
+    let areas = |ids: &[String]| -> Result<Vec<String>, ResolveError> {
+        ids.iter()
+            .map(|id| {
+                home.find_area(id)
+                    .map(|area| area.id.clone())
+                    .ok_or_else(|| ResolveError::UnknownArea(id.clone()))
+            })
+            .collect()
+    };
     let mut entities = target.entities.iter().chain(&target.exclude_entities);
     if let Some(id) = entities.find(|id| home.entity(id).is_none()) {
         return Err(ResolveError::UnknownEntity(id.clone()));
     }
-    Ok(())
+    Ok(Target {
+        floors: floors(&target.floors)?,
+        areas: areas(&target.areas)?,
+        exclude_areas: areas(&target.exclude_areas)?,
+        ..target.clone()
+    })
 }
 
 fn in_location(home: &Home, target: &Target, entity: &Entity) -> bool {
@@ -192,6 +209,35 @@ mod tests {
             },
         );
         assert_eq!(selected, ["light.bedroom", "sensor.bedroom_temperature"]);
+    }
+
+    #[test]
+    fn areas_and_floors_can_be_named() {
+        let selected = ids(
+            &home(),
+            Target {
+                areas: strings(&["Bedroom"]),
+                ..Target::default()
+            },
+        );
+        assert_eq!(selected, ["light.bedroom", "sensor.bedroom_temperature"]);
+        let home = home();
+        let floor = home.floors.first().unwrap();
+        let by_name = ids(
+            &home,
+            Target {
+                floors: strings(&[&floor.name.to_uppercase()]),
+                ..Target::default()
+            },
+        );
+        let by_id = ids(
+            &home,
+            Target {
+                floors: vec![floor.id.clone()],
+                ..Target::default()
+            },
+        );
+        assert_eq!(by_name, by_id);
     }
 
     #[test]

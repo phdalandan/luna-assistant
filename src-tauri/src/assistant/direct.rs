@@ -1,6 +1,6 @@
 //! Handles recognised requests without the language model, and shared execution helpers.
-use super::route::{self, Intent, Resolution};
-use super::session::{Memory, Turn};
+use super::route::{self, Intent, Resolution, Subject};
+use super::session::{Choice, Memory, Pending, Turn};
 use super::{Home, Metrics, Reply, clock};
 use crate::actions::{
     self, Action, ControlRequest, ExecutionReport, Plan, Target, ValidationError,
@@ -16,75 +16,129 @@ pub async fn handle<A: HomeApi>(
     memory: &mut Memory,
     request: &str,
 ) -> Option<Reply> {
+    let previous = memory.last_request.take();
+    if let Some(choice) = memory.choice.take() {
+        let picked = route::pick(&home.cache.read(), &choice.ids, request);
+        if let Some(ids) = picked {
+            if !home.connected {
+                return Some(Reply::direct(NOT_CONNECTED));
+            }
+            return perform(home, memory, choice.pending, ids).await;
+        }
+    }
     let intent = route::parse(request)?;
     if !home.connected {
         return Some(Reply::direct(NOT_CONNECTED));
     }
-    let domains = route::domains(&intent);
-    match intent {
-        Intent::Time => Some(Reply::direct(clock::read(&home.cache.read()).reply())),
-        Intent::Undo => Some(undo(home, memory).await),
-        Intent::Recheck => Some(recheck(home, memory).await),
-        Intent::Control { action, subject } => {
-            let ids = {
-                let snapshot = home.cache.read();
-                match route::resolve(&snapshot, memory, &subject, &domains) {
-                    Resolution::Exact(ids) => ids,
-                    Resolution::Choices(ids) => return Some(ask_which(&snapshot, memory, &ids)),
-                    Resolution::Unknown => return None,
-                }
-            };
-            let request = ControlRequest {
-                action,
-                target: Target {
-                    entities: ids,
-                    ..Target::default()
-                },
-                value: None,
-            };
-            Some(run(home, memory, vec![request], None).await)
+    let intent_domains = route::domains(&intent);
+    let (subject, pending) = match intent {
+        Intent::Thanks => return Some(Reply::direct("You're welcome.")),
+        Intent::Time => return Some(Reply::direct(clock::read(&home.cache.read()).reply())),
+        Intent::FollowUp { subject } => (subject, previous?),
+        Intent::Undo => return Some(undo(home, memory).await),
+        Intent::Recheck => return Some(recheck(home, memory).await),
+        Intent::Control { action, subject } => (subject, Pending::Control(action)),
+        Intent::Set { value, subject, .. } => (subject, Pending::Set(value)),
+        Intent::Query { subject, .. } => (subject, Pending::Query(intent_domains)),
+    };
+    let domains = pending_domains(&pending);
+    let ids = {
+        let snapshot = home.cache.read();
+        match route::resolve(&snapshot, memory, &subject, &domains) {
+            Resolution::Exact(ids) => ids,
+            Resolution::Choices(ids) => {
+                return Some(ask_which(&snapshot, memory, ids, pending));
+            }
+            Resolution::Unknown => return None,
         }
-        Intent::Set { value, subject, .. } => {
-            let (ids, action) = {
-                let home = home.cache.read();
-                let resolution = route::resolve(&home, memory, &subject, &domains);
-                if let Resolution::Choices(ids) = resolution {
-                    return Some(ask_which(&home, memory, &ids));
-                }
-                let Resolution::Exact(ids) = resolution else {
-                    return None;
-                };
-                let action = setting_action(&home, &ids)?;
-                (ids, action)
-            };
-            let request = ControlRequest {
-                action,
-                target: Target {
-                    entities: ids,
-                    ..Target::default()
-                },
-                value: Some(value),
-            };
-            Some(run(home, memory, vec![request], None).await)
-        }
-        Intent::Query { subject, .. } => {
-            let home = home.cache.read();
-            let ids = match route::resolve(&home, memory, &subject, &domains) {
-                Resolution::Exact(ids) => ids,
-                Resolution::Choices(ids) => return Some(ask_which(&home, memory, &ids)),
-                Resolution::Unknown => return None,
-            };
-            let entities: Vec<&Entity> = ids.iter().filter_map(|id| home.entity(id)).collect();
+    };
+    perform(home, memory, pending, ids).await
+}
+
+/// Carries out a recognised request on resolved entities.
+async fn perform<A: HomeApi>(
+    home: &Home<'_, A>,
+    memory: &mut Memory,
+    pending: Pending,
+    ids: Vec<String>,
+) -> Option<Reply> {
+    let (action, value) = match &pending {
+        Pending::Query(domains) => {
+            let snapshot = home.cache.read();
+            let entities: Vec<&Entity> = ids.iter().filter_map(|id| snapshot.entity(id)).collect();
             let mut turn = Turn::default();
-            let text = describe(&entities, &mut turn);
+            let text = if domains.as_slice() == route::TEMPERATURE_DOMAINS {
+                describe_temperatures(&entities, &mut turn)
+            } else {
+                describe(&entities, &mut turn)
+            };
             memory.record(turn);
-            Some(Reply::direct(text))
+            memory.last_request = Some(pending.clone());
+            return Some(Reply::direct(text));
         }
+        Pending::Control(action) => (*action, None),
+        Pending::Set(value) => (setting_action(&home.cache.read(), &ids)?, Some(*value)),
+    };
+    memory.last_request = Some(pending);
+    let request = ControlRequest {
+        action,
+        target: Target {
+            entities: ids,
+            ..Target::default()
+        },
+        value,
+    };
+    Some(run(home, memory, vec![request], None).await)
+}
+
+/// The domains a request applies to, so a follow-up resolves its new subject the same way.
+fn pending_domains(pending: &Pending) -> Vec<&'static str> {
+    match pending {
+        Pending::Query(domains) => domains.clone(),
+        Pending::Control(action) => route::domains(&Intent::Control {
+            action: *action,
+            subject: Subject::Pronoun,
+        }),
+        Pending::Set(_) => route::domains(&Intent::Set {
+            kind: None,
+            value: 0.0,
+            subject: Subject::Pronoun,
+        }),
     }
 }
 
-/// "Which one: Office AC or Bedroom AC?" The choices are remembered for the answer.
-fn ask_which(home: &HomeModel, memory: &mut Memory, ids: &[String]) -> Reply {
+/// "Bacsil AC is 27.5°, set to 26°." Sensors read as they are.
+fn describe_temperatures(entities: &[&Entity], turn: &mut Turn) -> String {
+    entities
+        .iter()
+        .map(|entity| {
+            let phrase = state_phrase(entity);
+            turn.refer(&entity.id, phrase.clone());
+            let number = |key: &str| {
+                entity
+                    .attributes
+                    .get(key)
+                    .and_then(serde_json::Value::as_f64)
+            };
+            let reading = match (
+                entity.domain(),
+                number("current_temperature"),
+                number("temperature"),
+            ) {
+                ("climate", Some(current), Some(target)) => {
+                    format!("{current}\u{b0}, set to {target}\u{b0}")
+                }
+                ("climate", Some(current), None) => format!("{current}\u{b0}"),
+                _ => phrase,
+            };
+            format!("{} is {reading}.", actions::capitalize(&entity.name))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// "Which one: Office AC or Bedroom AC?" The answer completes `pending`.
+fn ask_which(home: &HomeModel, memory: &mut Memory, ids: Vec<String>, pending: Pending) -> Reply {
     let entities: Vec<&Entity> = ids.iter().filter_map(|id| home.entity(id)).collect();
     let mut turn = Turn::default();
     let labels: Vec<String> = entities
@@ -102,6 +156,10 @@ fn ask_which(home: &HomeModel, memory: &mut Memory, ids: &[String]) -> Reply {
         })
         .collect();
     memory.record(turn);
+    memory.choice = Some(Choice {
+        ids: entities.iter().map(|entity| entity.id.clone()).collect(),
+        pending,
+    });
     let text = match labels.as_slice() {
         [first, second] => format!("{first} or {second}"),
         [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),

@@ -128,7 +128,7 @@ mod tests {
     fn bundled_catalog_is_valid() {
         let models = parse(CATALOG).unwrap();
         let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
-        assert_eq!(ids, ["qwen3-8b", "gemma-3-12b"]);
+        assert_eq!(ids, ["qwen3-8b", "qwen3-4b", "gemma-3-12b"]);
         assert!(find("qwen3-8b").unwrap().recommended);
         assert!(find("qwen3-8b").unwrap().chat.disable_thinking);
         assert!(find("missing").is_none());
@@ -155,7 +155,7 @@ mod tests {
 
     #[test]
     fn rejects_malformed_checksums() {
-        let result = catalog_with(|catalog| catalog["models"][1]["sha256"] = json!("abc"));
+        let result = catalog_with(|catalog| catalog["models"][2]["sha256"] = json!("abc"));
         assert_eq!(
             result,
             Err(CatalogError::InvalidChecksum("gemma-3-12b".into()))

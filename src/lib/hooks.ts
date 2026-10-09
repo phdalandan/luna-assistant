@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, events, type ModelInfo, type Status } from "./api";
 
 /** Listens to a backend event for the lifetime of the component. */
-function useEvent(subscribe: () => Promise<() => void>) {
+export function useEvent(subscribe: () => Promise<() => void>) {
   const initial = useRef(subscribe);
   useEffect(() => {
     let stop: (() => void) | undefined;

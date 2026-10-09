@@ -43,6 +43,8 @@ export const api = {
 export const events = {
   onStatus: (handler: (status: Status) => void) =>
     listen<Status>("status-changed", (event) => handler(event.payload)),
+  onConversationCleared: (handler: () => void) =>
+    listen("conversation-cleared", () => handler()),
   onModelsChanged: (handler: () => void) =>
     listen("models-changed", () => handler()),
   onDownloadProgress: (handler: (progress: DownloadProgress) => void) =>

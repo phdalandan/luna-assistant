@@ -90,6 +90,17 @@ h1 {
   font-weight: 500;
 }
 
+.content,
+.transcript {
+  scrollbar-width: thin;
+  scrollbar-color: transparent transparent;
+}
+
+.content.scrolling,
+.transcript.scrolling {
+  scrollbar-color: var(--muted) transparent;
+}
+
 .content {
   flex: 1;
   overflow-y: auto;

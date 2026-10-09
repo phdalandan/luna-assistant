@@ -6,11 +6,12 @@ export default defineConfig({
   plugins: [react()],
   clearScreen: false,
   server: {
-    port: 1420,
+    port: 1430,
     strictPort: true,
     watch: { ignored: ["**/src-tauri/**"] },
   },
   test: {
     environment: "jsdom",
+    exclude: ["**/node_modules/**", "src-tauri/**"],
   },
 });

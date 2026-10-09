@@ -24,6 +24,7 @@ use models::{DownloadProgress, ModelEvents, ModelManager, ModelStore};
 const STATUS_EVENT: &str = "status-changed";
 const MODELS_EVENT: &str = "models-changed";
 const PROGRESS_EVENT: &str = "download-progress";
+const CONVERSATION_EVENT: &str = "conversation-cleared";
 
 struct FrontendEvents(AppHandle);
 
@@ -64,6 +65,8 @@ pub fn run() {
             let db = db::open(&data_dir.join("luna.db")).inspect_err(|error| {
                 log::error!("failed to open database: {error}");
             })?;
+            // Each launch starts a new conversation.
+            history::clear(&db)?;
             let store = ModelStore::open(data_dir.join("models"))?;
             let events = Arc::new(FrontendEvents(app.handle().clone()));
             let models = Arc::new(ModelManager::new(

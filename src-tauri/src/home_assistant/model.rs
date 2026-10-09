@@ -215,10 +215,43 @@ impl Home {
         self.floors.iter().find(|floor| floor.id == id)
     }
 
+    /// An area by ID, or by a name or alias that fits exactly one area.
+    pub fn find_area(&self, reference: &str) -> Option<&Area> {
+        self.area(reference).or_else(|| {
+            unique(
+                self.areas
+                    .iter()
+                    .filter(|area| named(reference, &area.name, &area.aliases)),
+            )
+        })
+    }
+
+    /// A floor by ID, or by a name or alias that fits exactly one floor.
+    pub fn find_floor(&self, reference: &str) -> Option<&Floor> {
+        self.floor(reference).or_else(|| {
+            unique(
+                self.floors
+                    .iter()
+                    .filter(|floor| named(reference, &floor.name, &floor.aliases)),
+            )
+        })
+    }
+
     pub fn floor_id_of(&self, entity: &Entity) -> Option<&str> {
         let area = self.area(entity.area_id.as_deref()?)?;
         area.floor_id.as_deref()
     }
+}
+
+fn named(reference: &str, name: &str, aliases: &[String]) -> bool {
+    std::iter::once(name)
+        .chain(aliases.iter().map(String::as_str))
+        .any(|candidate| candidate.eq_ignore_ascii_case(reference.trim()))
+}
+
+fn unique<T>(mut matches: impl Iterator<Item = T>) -> Option<T> {
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn flatten(aliases: Vec<Option<String>>) -> Vec<String> {

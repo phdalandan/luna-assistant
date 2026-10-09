@@ -11,12 +11,18 @@ pub enum Intent {
     Time,
     Undo,
     Recheck,
+    Thanks,
     Control {
         action: Action,
         subject: Subject,
     },
     Query {
         asked: Asked,
+        subject: Subject,
+    },
+    /// "What about the AC?", "and the hallway", "the hallway too": the previous request again,
+    /// for something else.
+    FollowUp {
         subject: Subject,
     },
     /// A brightness or temperature. Without a stated kind, the device decides which.
@@ -45,14 +51,29 @@ pub enum Asked {
     Power,
     Opening,
     Locking,
+    /// "Check the porch light", "garage status": any readable state.
+    Status,
+    /// "How warm is the bedroom?"
+    Temperature,
 }
 
+/// Dropped from the start of a request.
 const FILLER: &[&str] = &[
-    "hey", "luna", "please", "can", "could", "would", "will", "you",
+    "hey", "luna", "please", "can", "could", "would", "will", "you", "sorry", "oh", "okay", "ok",
+    "wait", "actually", "um", "so", "just", "also", "now", "no", "nope", "nah",
 ];
-const ARTICLES: &[&str] = &["the", "my", "our", "still"];
+/// Dropped from the end of a request.
+const TRAILING: &[&str] = &[
+    "please", "now", "luna", "again", "instead", "too", "thanks", "for", "me",
+];
+/// Words that add nothing to a device phrase ("turn it back on") unless a device is named with
+/// them, as in "back porch".
+const SOFT: &[&str] = &[
+    "back", "again", "just", "also", "too", "instead", "actually",
+];
+const ARTICLES: &[&str] = &["the", "my", "our", "still", "in", "at", "of"];
 const PRONOUNS: &[&str] = &["it", "that", "them", "those", "these", "this"];
-const SETTING_VERBS: &[&str] = &["set", "dim", "change", "turn", "put"];
+const SETTING_VERBS: &[&str] = &["set", "dim", "change", "turn", "put", "make"];
 const SETTING_WORDS: &[&str] = &["brightness", "temperature"];
 /// Requests about several places or exceptions need the model's interpretation.
 const BROAD: &[&str] = &[
@@ -117,6 +138,85 @@ const POWER_DOMAINS: &[&str] = &[
     "binary_sensor",
 ];
 const OPENING_DOMAINS: &[&str] = &["cover", "binary_sensor"];
+const STATUS_DOMAINS: &[&str] = &[
+    "light",
+    "switch",
+    "fan",
+    "input_boolean",
+    "media_player",
+    "climate",
+    "cover",
+    "lock",
+    "binary_sensor",
+    "sensor",
+];
+/// A statement about a device's state, such as "it's on I think", is checked, never acted on.
+const STATEMENT_STARTS: &[&str] = &[
+    "it", "it's", "its", "that", "that's", "thats", "they", "they're",
+];
+const STATE_WORDS: &[&str] = &[
+    "on", "off", "open", "closed", "locked", "unlocked", "wrong", "right", "true",
+];
+const ACTION_VERBS: &[&str] = &[
+    "turn", "switch", "set", "open", "close", "shut", "lock", "unlock", "dim", "make", "put",
+    "change", "start", "stop", "activate",
+];
+const STATUS_WORDS: &[&str] = &["check", "status", "state"];
+const TEMPERATURE_WORDS: &[&str] = &["temperature", "warm", "cold", "hot"];
+const TEMPERATURE_FILLER: &[&str] = &[
+    "what",
+    "what's",
+    "whats",
+    "is",
+    "the",
+    "how",
+    "temperature",
+    "warm",
+    "cold",
+    "hot",
+    "room",
+    "inside",
+    "current",
+    "currently",
+    "reading",
+    "there",
+    "on",
+    "for",
+    "by",
+];
+/// Temperature questions read climate devices and temperature sensors only.
+pub const TEMPERATURE_DOMAINS: &[&str] = &["climate", "sensor.temperature"];
+/// A sentence with any of these is not just a device name, so it is never a follow-up.
+const NOT_A_SUBJECT: &[&str] = &[
+    "what",
+    "why",
+    "how",
+    "when",
+    "where",
+    "who",
+    "which",
+    "i",
+    "i'm",
+    "im",
+    "we",
+    "we're",
+    "is",
+    "are",
+    "was",
+    "were",
+    "do",
+    "does",
+    "did",
+    "should",
+    "goodnight",
+    "night",
+    "morning",
+];
+const MAX_FOLLOW_UP_WORDS: usize = 4;
+const STATUS_FILLER: &[&str] = &[
+    "check", "status", "state", "what", "what's", "whats", "is", "the", "of", "for", "show", "me",
+    "tell", "current",
+];
 const CONTROL_DOMAINS: &[&str] = &[
     "light",
     "switch",
@@ -171,21 +271,69 @@ fn parse_sentence(sentence: &str) -> Option<Intent> {
     if content == ["time"] {
         return Some(Intent::Time);
     }
-    if RECHECK.contains(&text.as_str()) {
+    let words: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if RECHECK.contains(&text.as_str()) || states_a_fact(&words) {
         return Some(Intent::Recheck);
     }
-    let words: Vec<&str> = tokens.iter().map(String::as_str).collect();
+    if let ["thanks" | "thank" | "cheers", rest @ ..] = words.as_slice()
+        && rest
+            .iter()
+            .all(|word| matches!(*word, "you" | "so" | "much" | "luna"))
+    {
+        return Some(Intent::Thanks);
+    }
+    let has_number = words.iter().any(|word| word.parse::<f64>().is_ok());
+    if !has_number
+        && words.iter().any(|word| TEMPERATURE_WORDS.contains(word))
+        && !words
+            .first()
+            .is_some_and(|word| SETTING_VERBS.contains(word))
+    {
+        let rest: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|word| !TEMPERATURE_FILLER.contains(word))
+            .collect();
+        return Some(Intent::Query {
+            asked: Asked::Temperature,
+            subject: subject(&rest)?,
+        });
+    }
+    if let ["what" | "what's" | "whats", middle @ .., "set", "to"] = words.as_slice() {
+        let rest: Vec<&str> = middle
+            .iter()
+            .copied()
+            .filter(|word| *word != "is")
+            .collect();
+        return Some(Intent::Query {
+            asked: Asked::Status,
+            subject: subject(&rest)?,
+        });
+    }
+    if words.first() == Some(&"check") || words.iter().any(|word| STATUS_WORDS[1..].contains(word))
+    {
+        let rest: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|word| !STATUS_FILLER.contains(word))
+            .collect();
+        return Some(Intent::Query {
+            asked: Asked::Status,
+            subject: subject(&rest)?,
+        });
+    }
     match words.as_slice() {
         ["undo" | "revert", rest @ ..] if rest.iter().all(|word| UNDO_WORDS.contains(word)) => {
             Some(Intent::Undo)
         }
         ["put" | "change" | "set", "it" | "that", "back"] => Some(Intent::Undo),
-        ["turn" | "switch", "on", rest @ ..] | ["turn" | "switch", rest @ .., "on"] => {
-            control(Action::TurnOn, rest)
-        }
-        ["turn" | "switch", "off", rest @ ..] | ["turn" | "switch", rest @ .., "off"] => {
-            control(Action::TurnOff, rest)
-        }
+        ["what" | "how", "about", rest @ ..] | ["and", rest @ ..] => Some(Intent::FollowUp {
+            subject: subject(rest)?,
+        }),
+        ["turn" | "switch", "on", rest @ ..] => control(Action::TurnOn, rest),
+        ["turn" | "switch", rest @ .., "on"] => control(Action::TurnOn, rest),
+        ["turn" | "switch", "off", rest @ ..] => control(Action::TurnOff, rest),
+        ["turn" | "switch", rest @ .., "off"] => control(Action::TurnOff, rest),
         ["open", rest @ ..] => control(Action::Open, rest),
         ["close" | "shut", rest @ ..] => control(Action::Close, rest),
         ["lock", rest @ ..] => control(Action::Lock, rest),
@@ -193,9 +341,13 @@ fn parse_sentence(sentence: &str) -> Option<Intent> {
         [first, ..] if SETTING_VERBS.contains(first) || SETTING_WORDS.contains(first) => {
             setting(&words)
         }
+        // "Actually 22" after a setting: the same device, a new value.
+        [value] | [value, "percent" | "degrees" | "degree"] if value.parse::<f64>().is_ok() => {
+            setting(&words)
+        }
         ["is" | "are", rest @ .., last] => {
             let asked = match *last {
-                "on" | "off" => Asked::Power,
+                "on" | "off" | "running" => Asked::Power,
                 "open" | "closed" => Asked::Opening,
                 "locked" | "unlocked" => Asked::Locking,
                 _ => return None,
@@ -205,8 +357,33 @@ fn parse_sentence(sentence: &str) -> Option<Intent> {
                 subject: subject(rest)?,
             })
         }
+        // "Porch light on", "kitchen light off".
+        [rest @ .., "on"] if is_subject_only(rest) => control(Action::TurnOn, rest),
+        [rest @ .., "off"] if is_subject_only(rest) => control(Action::TurnOff, rest),
+        // "The hallway" alone continues the previous request.
+        _ if words.len() <= MAX_FOLLOW_UP_WORDS && is_subject_only(&words) => {
+            Some(Intent::FollowUp {
+                subject: subject(&words)?,
+            })
+        }
         _ => None,
     }
+}
+
+fn is_subject_only(words: &[&str]) -> bool {
+    !words.is_empty()
+        && !words
+            .iter()
+            .any(|word| NOT_A_SUBJECT.contains(word) || ACTION_VERBS.contains(word))
+}
+
+/// "It's on I think", "it is not off", "that's wrong": the user disputes what Luna reported.
+fn states_a_fact(words: &[&str]) -> bool {
+    words
+        .first()
+        .is_some_and(|word| STATEMENT_STARTS.contains(word))
+        && !words.iter().any(|word| ACTION_VERBS.contains(word))
+        && words.iter().any(|word| STATE_WORDS.contains(word))
 }
 
 /// "Set the brightness to 50%", "brightness 50%", "set it to 26", "dim the porch to 10 percent".
@@ -272,13 +449,64 @@ fn subject(words: &[&str]) -> Option<Subject> {
         .copied()
         .filter(|word| !ARTICLES.contains(word))
         .collect();
+    let meaningful: Vec<&str> = words
+        .iter()
+        .copied()
+        .filter(|word| !SOFT.contains(word))
+        .collect();
+    match meaningful.as_slice() {
+        [] => return None,
+        [pronoun] if PRONOUNS.contains(pronoun) => return Some(Subject::Pronoun),
+        _ => {}
+    }
     match words.as_slice() {
-        [] => None,
-        [pronoun] if PRONOUNS.contains(pronoun) => Some(Subject::Pronoun),
         _ if words.iter().any(|word| BROAD.contains(word)) => None,
         _ => Some(Subject::Named(
             words.iter().map(|word| (*word).to_owned()).collect(),
         )),
+    }
+}
+
+const ORDINALS: &[&str] = &["first", "second", "third", "fourth"];
+
+/// The devices chosen in answer to "Which one?": "the first one", "second", "both", or a name.
+pub fn pick(home: &Home, choices: &[String], answer: &str) -> Option<Vec<String>> {
+    let words: Vec<String> = tokens(answer)
+        .into_iter()
+        .filter(|word| !matches!(word.as_str(), "the" | "one" | "number" | "of" | "them"))
+        .collect();
+    if let [word] = words.as_slice()
+        && matches!(word.as_str(), "both" | "all" | "each" | "every")
+    {
+        return Some(choices.to_vec());
+    }
+    let index = match words.as_slice() {
+        [word] if word == "last" => choices.len().checked_sub(1),
+        [word] => ORDINALS
+            .iter()
+            .position(|ordinal| ordinal == word)
+            .or_else(|| word.parse::<usize>().ok()?.checked_sub(1)),
+        _ => None,
+    };
+    if let Some(index) = index {
+        return choices.get(index).cloned().map(|id| vec![id]);
+    }
+    let phrase: Vec<String> = words.iter().map(|word| stem(word)).collect();
+    if phrase.is_empty() {
+        return None;
+    }
+    let entities: Vec<&Entity> = choices.iter().filter_map(|id| home.entity(id)).collect();
+    let named: Vec<&&Entity> = entities
+        .iter()
+        .filter(|entity| names_match(entity, &phrase))
+        .collect();
+    let covering: Vec<&&Entity> = entities
+        .iter()
+        .filter(|entity| covers(home, entity, &phrase))
+        .collect();
+    match (named.as_slice(), covering.as_slice()) {
+        ([entity], _) | ([], [entity]) => Some(vec![entity.id.clone()]),
+        _ => None,
     }
 }
 
@@ -294,6 +522,8 @@ pub fn domains(intent: &Intent) -> Vec<&'static str> {
             Asked::Power => POWER_DOMAINS.to_vec(),
             Asked::Opening => OPENING_DOMAINS.to_vec(),
             Asked::Locking => vec!["lock"],
+            Asked::Status => STATUS_DOMAINS.to_vec(),
+            Asked::Temperature => TEMPERATURE_DOMAINS.to_vec(),
         },
         Intent::Set { kind, .. } => match kind {
             Some(Setting::Brightness) => vec!["light"],
@@ -325,10 +555,9 @@ pub fn resolve(home: &Home, memory: &Memory, subject: &Subject, domains: &[&str]
                 .map(|reference| reference.id.clone())
                 .collect();
             let valid = !ids.is_empty()
-                && ids.iter().all(|id| {
-                    home.entity(id)
-                        .is_some_and(|entity| domains.contains(&entity.domain()))
-                });
+                && ids
+                    .iter()
+                    .all(|id| home.entity(id).is_some_and(|entity| fits(entity, domains)));
             if valid {
                 Resolution::Exact(ids)
             } else {
@@ -340,18 +569,47 @@ pub fn resolve(home: &Home, memory: &Memory, subject: &Subject, domains: &[&str]
 }
 
 fn resolve_named(home: &Home, words: &[String], domains: &[&str]) -> Resolution {
-    let phrase: Vec<String> = words.iter().map(|word| stem(word)).collect();
+    let phrase: Vec<String> = words
+        .iter()
+        .map(|word| stem(word))
+        .filter(|word| !SOFT.contains(&word.as_str()) || names_anything(home, word))
+        .collect();
     let candidates: Vec<&Entity> = home
         .entities
         .values()
-        .filter(|entity| !entity.internal && domains.contains(&entity.domain()))
+        .filter(|entity| !entity.internal && fits(entity, domains))
         .filter(|entity| covers(home, entity, &phrase))
         .collect();
+    // "The AC" is the climate device, not "AC Display light" or "AC Jet mode" switches.
+    let kinds: Vec<&String> = phrase.iter().filter(|word| device_word(word)).collect();
+    let of_kind: Vec<&Entity> = candidates
+        .iter()
+        .copied()
+        .filter(|entity| kinds.iter().any(|word| is_kind_of(word, entity)))
+        .collect();
+    let candidates = if kinds.is_empty() || of_kind.is_empty() {
+        candidates
+    } else {
+        of_kind
+    };
     let ids = |entities: &[&Entity]| entities.iter().map(|entity| entity.id.clone()).collect();
     match candidates.len() {
         0 => return Resolution::Unknown,
         1 => return Resolution::Exact(ids(&candidates)),
         _ => {}
+    }
+    // "AC light" is the one device whose own name has every word, "Bacsil AC Display light".
+    let complete: Vec<&Entity> = candidates
+        .iter()
+        .copied()
+        .filter(|entity| {
+            let names = name_words(entity);
+            phrase.iter().all(|word| names.contains(word))
+        })
+        .collect();
+    // One word like "AC" can fit several devices of that kind, so it still asks.
+    if phrase.len() > 1 && complete.len() == 1 {
+        return Resolution::Exact(ids(&complete));
     }
     // "kitchen light" picks the light named "Kitchen" over "Kitchen Island".
     let named: Vec<&Entity> = candidates
@@ -391,12 +649,22 @@ fn covers(home: &Home, entity: &Entity, phrase: &[String]) -> bool {
     for word in phrase {
         if known.contains(word) {
             named = true;
-        } else if !is_kind_of(word, entity.domain()) {
+        } else if !is_kind_of(word, entity) {
             return false;
         }
     }
     // "The AC" names only a kind of device, so every device of that kind fits.
     named || phrase.iter().all(|word| device_word(word))
+}
+
+fn names_anything(home: &Home, word: &str) -> bool {
+    home.entities
+        .values()
+        .any(|entity| !entity.internal && name_words(entity).contains(word))
+        || home
+            .areas
+            .iter()
+            .any(|area| words(&area.name).contains(word))
 }
 
 fn names_match(entity: &Entity, phrase: &[String]) -> bool {
@@ -422,10 +690,35 @@ fn name_words(entity: &Entity) -> HashSet<String> {
     known
 }
 
-fn is_kind_of(word: &str, domain: &str) -> bool {
-    DEVICE_WORDS
+/// A domain, or `sensor.temperature` for sensors that measure temperature.
+fn fits(entity: &Entity, domains: &[&str]) -> bool {
+    domains.iter().any(|domain| match *domain {
+        "sensor.temperature" => {
+            entity.domain() == "sensor" && entity.device_class() == Some("temperature")
+        }
+        domain => domain == entity.domain(),
+    })
+}
+
+/// "Blinds" are covers that are blinds, not the garage door.
+fn is_kind_of(word: &str, entity: &Entity) -> bool {
+    let domain = entity.domain();
+    let class = entity.device_class();
+    let of_domain = DEVICE_WORDS
         .iter()
-        .any(|(kind, domains)| *kind == word && domains.contains(&domain))
+        .any(|(kind, domains)| *kind == word && domains.contains(&domain));
+    of_domain
+        && match (word, domain) {
+            ("blind" | "shade" | "curtain" | "shutter", "cover") => matches!(
+                class,
+                None | Some("blind" | "shade" | "curtain" | "shutter" | "awning")
+            ),
+            ("door", "cover") => matches!(class, Some("door" | "garage" | "gate")),
+            ("door", "binary_sensor") => matches!(class, Some("door" | "garage_door" | "opening")),
+            ("window", "cover") => matches!(class, None | Some("window")),
+            ("window", "binary_sensor") => class == Some("window"),
+            _ => true,
+        }
 }
 
 fn device_word(word: &str) -> bool {
@@ -468,15 +761,17 @@ fn tokens(text: &str) -> Vec<String> {
         })
         .collect();
     let mut words: Vec<String> = cleaned.split_whitespace().map(str::to_owned).collect();
-    while words
-        .first()
-        .is_some_and(|word| FILLER.contains(&word.as_str()))
+    while words.len() > 1
+        && words
+            .first()
+            .is_some_and(|word| FILLER.contains(&word.as_str()))
     {
         words.remove(0);
     }
-    while words
-        .last()
-        .is_some_and(|word| matches!(word.as_str(), "please" | "now" | "luna"))
+    while words.len() > 1
+        && words
+            .last()
+            .is_some_and(|word| TRAILING.contains(&word.as_str()))
     {
         words.pop();
     }
@@ -552,6 +847,77 @@ mod tests {
         assert_eq!(parse("oh wait. revert that"), Some(Intent::Undo));
         assert_eq!(parse("The porch is dark. Turn on the light."), None);
         assert_eq!(parse("Are you sure?"), Some(Intent::Recheck));
+        for statement in [
+            "It is on I thinkn",
+            "It is not off.",
+            "no it's on",
+            "that's wrong",
+        ] {
+            assert_eq!(parse(statement), Some(Intent::Recheck), "{statement}");
+        }
+        assert_eq!(
+            parse("no, turn it off"),
+            Some(Intent::Control {
+                action: Action::TurnOff,
+                subject: Subject::Pronoun
+            })
+        );
+        assert_eq!(
+            parse("Check guest mode status for the router"),
+            Some(Intent::Query {
+                asked: Asked::Status,
+                subject: named(&["guest", "mode", "router"])
+            })
+        );
+        assert_eq!(
+            parse("what's the status of the garage"),
+            Some(Intent::Query {
+                asked: Asked::Status,
+                subject: named(&["garage"])
+            })
+        );
+        for request in [
+            "sorry turn it back on",
+            "oh wait, turn it on again",
+            "okay just turn it on for me please",
+            "actually turn it back on too",
+        ] {
+            assert_eq!(
+                parse(request),
+                Some(Intent::Control {
+                    action: Action::TurnOn,
+                    subject: Subject::Pronoun
+                }),
+                "{request}"
+            );
+        }
+        assert_eq!(
+            parse("What about the AC?"),
+            Some(Intent::FollowUp {
+                subject: named(&["ac"])
+            })
+        );
+        assert_eq!(
+            parse("and the kitchen?"),
+            Some(Intent::FollowUp {
+                subject: named(&["kitchen"])
+            })
+        );
+        assert_eq!(parse("what about the kitchen and hallway"), None);
+        assert_eq!(
+            parse("Sorry. Turn it back on"),
+            Some(Intent::Control {
+                action: Action::TurnOn,
+                subject: Subject::Pronoun
+            })
+        );
+        assert_eq!(
+            parse("turn the back porch light off"),
+            Some(Intent::Control {
+                action: Action::TurnOff,
+                subject: named(&["back", "porch", "light"])
+            })
+        );
         assert_eq!(
             parse("turn it off"),
             Some(Intent::Control {
@@ -583,6 +949,18 @@ mod tests {
             set(Some(Setting::Brightness), 10.0, Subject::Pronoun)
         );
         assert_eq!(parse("set it to 26"), set(None, 26.0, Subject::Pronoun));
+        assert_eq!(
+            parse("set it back to 26"),
+            set(None, 26.0, Subject::Pronoun)
+        );
+        assert_eq!(
+            parse("make it 24 degrees"),
+            set(Some(Setting::Temperature), 24.0, Subject::Pronoun)
+        );
+        assert_eq!(
+            parse("set the back porch to 50%"),
+            set(Some(Setting::Brightness), 50.0, named(&["back", "porch"]))
+        );
         assert_eq!(
             parse("Set the temperature to 21.5"),
             set(Some(Setting::Temperature), 21.5, Subject::Pronoun)
@@ -698,6 +1076,42 @@ mod tests {
         assert_eq!(
             resolve_text(&home, "turn off the kitchen island"),
             Some(vec!["light.kitchen_island".into()])
+        );
+    }
+
+    #[test]
+    fn filler_words_are_ignored_unless_a_device_is_named_with_them() {
+        let mut home = porch_home();
+        assert_eq!(
+            resolve_text(&home, "turn the porch light back on"),
+            Some(vec!["light.front_porch".into()])
+        );
+        home.apply_state(
+            "light.back_porch",
+            Some(state(
+                "light.back_porch",
+                "off",
+                json!({"friendly_name": "Back Porch"}),
+            )),
+        );
+        assert_eq!(
+            resolve_text(&home, "turn on the back porch light"),
+            Some(vec!["light.back_porch".into()])
+        );
+    }
+
+    #[test]
+    fn a_name_containing_every_word_is_exact() {
+        let mut home = home();
+        for (id, name) in [
+            ("switch.ac_display_light", "Bacsil AC Display light"),
+            ("switch.ac_jet_mode", "Bacsil AC Jet mode"),
+        ] {
+            home.apply_state(id, Some(state(id, "off", json!({"friendly_name": name}))));
+        }
+        assert_eq!(
+            resolve_text(&home, "Is the AC light on?"),
+            Some(vec!["switch.ac_display_light".into()])
         );
     }
 

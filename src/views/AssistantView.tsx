@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ModelList } from "../components/ModelList";
-import { api, errorMessage, type Interaction, type Status } from "../lib/api";
+import {
+  api,
+  errorMessage,
+  events,
+  type Interaction,
+  type Status,
+} from "../lib/api";
 import { formatTime } from "../lib/format";
-import { useModels, useStatus } from "../lib/hooks";
+import { useEvent, useModels, useStatus } from "../lib/hooks";
 
 export function AssistantView() {
   const status = useStatus();
@@ -20,6 +26,8 @@ export function AssistantView() {
       .then(setInteractions)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, []);
+
+  useEvent(() => events.onConversationCleared(() => setInteractions([])));
 
   useEffect(() => {
     end.current?.scrollIntoView?.({ block: "end" });
