@@ -6,6 +6,13 @@ set -euo pipefail
 LLAMA_CPP_TAG="b11517"
 LLAMA_CPP_COMMIT="8a1a9b5126126e5228b95fa909d4b08fac65e8b3"
 
+for tool in git cmake; do
+  if ! command -v "$tool" > /dev/null; then
+    echo "$tool is required to build llama-server. On macOS: brew install $tool (and xcode-select --install)." >&2
+    exit 1
+  fi
+done
+
 root="$(cd "$(dirname "$0")/.." && pwd)"
 target="${1:-$(rustc -vV | sed -n 's/^host: //p')}"
 work="${LLAMA_BUILD_DIR:-$root/src-tauri/target/llama.cpp}"
