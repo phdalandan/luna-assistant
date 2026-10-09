@@ -17,6 +17,8 @@ use server::Server;
 
 /// Unloading after inactivity keeps memory free while Luna sits idle.
 const IDLE_UNLOAD: Duration = Duration::from_secs(5 * 60);
+/// Replies are one sentence or a tool call, so a low cap bounds runaway generation.
+const MAX_RESPONSE_TOKENS: u32 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InferenceError {
@@ -80,6 +82,69 @@ pub struct ToolCall {
 pub struct FunctionCall {
     pub name: String,
     pub arguments: Value,
+}
+
+/// Timings reported by llama.cpp for one request.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Timings {
+    pub prompt_tokens: u64,
+    /// Prompt tokens reused from the previous request's cache.
+    pub cached_tokens: u64,
+    pub prompt_ms: f64,
+    pub generated_tokens: u64,
+    pub generation_ms: f64,
+}
+
+impl Timings {
+    fn from_wire(timings: &Value) -> Self {
+        let number = |key: &str| timings[key].as_f64().unwrap_or_default();
+        Self {
+            prompt_tokens: number("prompt_n") as u64,
+            cached_tokens: number("cache_n") as u64,
+            prompt_ms: number("prompt_ms"),
+            generated_tokens: number("predicted_n") as u64,
+            generation_ms: number("predicted_ms"),
+        }
+    }
+
+    pub fn add(&mut self, other: Self) {
+        self.prompt_tokens += other.prompt_tokens;
+        self.cached_tokens += other.cached_tokens;
+        self.prompt_ms += other.prompt_ms;
+        self.generated_tokens += other.generated_tokens;
+        self.generation_ms += other.generation_ms;
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Warmup {
+    AlreadyReady,
+    Restored,
+    Evaluated(Timings),
+}
+
+/// Names the saved KV cache after everything that shapes it. Only the system message and the
+/// tools are hashed, so a request's own prompt matches the warm-up that saved it.
+fn prompt_file(spec: &ModelSpec, messages: &[ChatMessage], tools: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    let system = messages
+        .iter()
+        .take_while(|message| message.role == Role::System)
+        .map(ChatMessage::to_wire)
+        .collect::<Vec<_>>();
+    let mut hasher = Sha256::new();
+    hasher.update(spec.id.as_bytes());
+    hasher.update(spec.context_length.to_le_bytes());
+    hasher.update(json!([system, tools]).to_string().as_bytes());
+    let digest = hasher.finalize();
+    let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("prompt-{hex}.bin")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct Completion {
+    pub message: ChatMessage,
+    pub timings: Timings,
 }
 
 impl ChatMessage {
@@ -171,6 +236,7 @@ pub struct Engine {
 struct Inner {
     runtime: PathBuf,
     pid_file: PidFile,
+    prompt_cache: PathBuf,
     server: Mutex<Option<Server>>,
     status: watch::Sender<EngineStatus>,
     activity: AtomicU64,
@@ -178,13 +244,18 @@ struct Inner {
 
 impl Engine {
     /// `pid_file` records the running server so one left behind by a crash is stopped here.
-    pub fn new(runtime: PathBuf, pid_file: PathBuf) -> Self {
+    /// `prompt_cache` holds the evaluated shared prompt so later loads can skip evaluating it.
+    pub fn new(runtime: PathBuf, pid_file: PathBuf, prompt_cache: PathBuf) -> Self {
         let pid_file = PidFile::new(pid_file);
         pid_file.stop_leftover();
+        if let Err(error) = std::fs::create_dir_all(&prompt_cache) {
+            log::warn!("cannot create the prompt cache directory: {error}");
+        }
         Self {
             inner: Arc::new(Inner {
                 runtime,
                 pid_file,
+                prompt_cache,
                 server: Mutex::new(None),
                 status: watch::Sender::new(EngineStatus::Idle),
                 activity: AtomicU64::new(0),
@@ -238,12 +309,97 @@ impl Engine {
         spec: &ModelSpec,
         messages: &[ChatMessage],
         tools: &Value,
-    ) -> Result<ChatMessage, InferenceError> {
+    ) -> Result<Completion, InferenceError> {
+        self.complete(spec, messages, tools, MAX_RESPONSE_TOKENS)
+            .await
+    }
+
+    /// Loads the model and prepares the shared prompt in `messages`: restored from disk when it
+    /// was saved before, otherwise evaluated and saved. Does nothing if it is already prepared.
+    pub async fn warm(
+        &self,
+        spec: &ModelSpec,
+        messages: &[ChatMessage],
+        tools: &Value,
+    ) -> Result<Warmup, InferenceError> {
         let _activity = IdleGuard(self);
         let mut server = self.inner.server.lock().await;
         self.ensure_loaded(&mut server, spec).await?;
-        let running = server.as_ref().expect("model is loaded");
-        running.chat(spec, messages, tools).await
+        let running = server.as_mut().expect("model is loaded");
+        if running.prompt_ready {
+            return Ok(Warmup::AlreadyReady);
+        }
+        let file = prompt_file(spec, messages, tools);
+        if self.restore_prompt(running, &file).await {
+            return Ok(Warmup::Restored);
+        }
+        let completion = running.chat(spec, messages, tools, 1).await?;
+        running.prompt_ready = true;
+        self.save_prompt(running, &file).await;
+        Ok(Warmup::Evaluated(completion.timings))
+    }
+
+    async fn complete(
+        &self,
+        spec: &ModelSpec,
+        messages: &[ChatMessage],
+        tools: &Value,
+        max_tokens: u32,
+    ) -> Result<Completion, InferenceError> {
+        let _activity = IdleGuard(self);
+        let mut server = self.inner.server.lock().await;
+        self.ensure_loaded(&mut server, spec).await?;
+        let running = server.as_mut().expect("model is loaded");
+        if running.prompt_ready {
+            return running.chat(spec, messages, tools, max_tokens).await;
+        }
+        // The first request after loading either reuses the saved prompt or saves its own.
+        let file = prompt_file(spec, messages, tools);
+        let restored = self.restore_prompt(running, &file).await;
+        let completion = running.chat(spec, messages, tools, max_tokens).await?;
+        running.prompt_ready = true;
+        if !restored {
+            self.save_prompt(running, &file).await;
+        }
+        Ok(completion)
+    }
+
+    async fn save_prompt(&self, running: &Server, file: &str) {
+        match running.save_prompt(file).await {
+            Ok(()) => self.remove_other_prompts(file),
+            Err(error) => log::warn!("could not save the evaluated prompt: {error}"),
+        }
+    }
+
+    /// True when a saved prompt was loaded. A missing or unusable file means the prompt is
+    /// evaluated as usual, so failures are only logged.
+    async fn restore_prompt(&self, running: &mut Server, file: &str) -> bool {
+        if !self.inner.prompt_cache.join(file).is_file() {
+            return false;
+        }
+        match running.restore_prompt(file).await {
+            Ok(()) => {
+                running.prompt_ready = true;
+                true
+            }
+            Err(error) => {
+                log::warn!("could not restore the saved prompt: {error}");
+                false
+            }
+        }
+    }
+
+    fn remove_other_prompts(&self, keep: &str) {
+        let Ok(entries) = std::fs::read_dir(&self.inner.prompt_cache) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry.file_name() != keep
+                && let Err(error) = std::fs::remove_file(entry.path())
+            {
+                log::warn!("could not remove an old saved prompt: {error}");
+            }
+        }
     }
 
     async fn ensure_loaded(
@@ -261,7 +417,7 @@ impl Engine {
         self.inner.status.send_replace(EngineStatus::Loading {
             model: spec.id.clone(),
         });
-        match Server::start(&self.inner.runtime, spec).await {
+        match Server::start(&self.inner.runtime, spec, &self.inner.prompt_cache).await {
             Ok(running) => {
                 if let Some(pid) = running.pid() {
                     self.inner.pid_file.record(pid);
@@ -326,7 +482,11 @@ mod tests {
 
     fn engine(runtime: PathBuf, name: &str) -> Engine {
         let pid_file = std::env::temp_dir().join(format!("luna-{name}-{}.pid", std::process::id()));
-        Engine::new(runtime, pid_file)
+        Engine::new(
+            runtime,
+            pid_file,
+            std::env::temp_dir().join(format!("luna-{name}-cache")),
+        )
     }
 
     fn spec(path: PathBuf, context_length: u32) -> ModelSpec {
@@ -359,6 +519,29 @@ mod tests {
             message.to_wire()["tool_calls"][0]["function"]["arguments"],
             "{\"action\":\"turn_off\"}"
         );
+    }
+
+    #[test]
+    fn saved_prompts_are_named_by_system_message_tools_and_model() {
+        let spec = spec(PathBuf::from("/model.gguf"), 4096);
+        let system = |text: &str| ChatMessage::new(Role::System, text);
+        let user = |text: &str| ChatMessage::new(Role::User, text);
+        let name =
+            |messages: &[ChatMessage], spec: &ModelSpec| prompt_file(spec, messages, &json!([]));
+        let warm = name(&[system("layout"), user("Hello")], &spec);
+        assert_eq!(warm, name(&[system("layout"), user("Turn it off")], &spec));
+        assert_ne!(warm, name(&[system("new layout"), user("Hello")], &spec));
+        assert_ne!(
+            warm,
+            name(
+                &[system("layout"), user("Hello")],
+                &ModelSpec {
+                    context_length: 8192,
+                    ..spec.clone()
+                }
+            )
+        );
+        assert!(warm.starts_with("prompt-") && warm.ends_with(".bin"));
     }
 
     #[test]
@@ -442,7 +625,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(!reply.content.is_empty());
+        assert!(!reply.message.content.is_empty());
 
         engine.unload().await;
         assert_eq!(engine.status(), EngineStatus::Idle);

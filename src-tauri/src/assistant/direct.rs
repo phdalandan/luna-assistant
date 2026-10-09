@@ -1,0 +1,347 @@
+//! Handles recognised requests without the language model, and shared execution helpers.
+use super::route::{self, Intent, Resolution};
+use super::session::{Memory, Turn};
+use super::{Home, Metrics, Reply, clock};
+use crate::actions::{
+    self, Action, ControlRequest, ExecutionReport, Plan, Target, ValidationError,
+};
+use crate::home_assistant::model::{Entity, Home as HomeModel};
+use crate::home_assistant::{HomeApi, HomeCache};
+
+pub const NOT_CONNECTED: &str = "Home Assistant isn't connected right now.";
+
+/// Returns `None` when the request needs the model.
+pub async fn handle<A: HomeApi>(
+    home: &Home<'_, A>,
+    memory: &mut Memory,
+    request: &str,
+) -> Option<Reply> {
+    let intent = route::parse(request)?;
+    if !home.connected {
+        return Some(Reply::direct(NOT_CONNECTED));
+    }
+    let domains = route::domains(&intent);
+    match intent {
+        Intent::Time => Some(Reply::direct(clock::read(&home.cache.read()).reply())),
+        Intent::Undo => Some(undo(home, memory).await),
+        Intent::Recheck => Some(recheck(home, memory).await),
+        Intent::Control { action, subject } => {
+            let ids = {
+                let snapshot = home.cache.read();
+                match route::resolve(&snapshot, memory, &subject, &domains) {
+                    Resolution::Exact(ids) => ids,
+                    Resolution::Choices(ids) => return Some(ask_which(&snapshot, memory, &ids)),
+                    Resolution::Unknown => return None,
+                }
+            };
+            let request = ControlRequest {
+                action,
+                target: Target {
+                    entities: ids,
+                    ..Target::default()
+                },
+                value: None,
+            };
+            Some(run(home, memory, vec![request], None).await)
+        }
+        Intent::Set { value, subject, .. } => {
+            let (ids, action) = {
+                let home = home.cache.read();
+                let resolution = route::resolve(&home, memory, &subject, &domains);
+                if let Resolution::Choices(ids) = resolution {
+                    return Some(ask_which(&home, memory, &ids));
+                }
+                let Resolution::Exact(ids) = resolution else {
+                    return None;
+                };
+                let action = setting_action(&home, &ids)?;
+                (ids, action)
+            };
+            let request = ControlRequest {
+                action,
+                target: Target {
+                    entities: ids,
+                    ..Target::default()
+                },
+                value: Some(value),
+            };
+            Some(run(home, memory, vec![request], None).await)
+        }
+        Intent::Query { subject, .. } => {
+            let home = home.cache.read();
+            let ids = match route::resolve(&home, memory, &subject, &domains) {
+                Resolution::Exact(ids) => ids,
+                Resolution::Choices(ids) => return Some(ask_which(&home, memory, &ids)),
+                Resolution::Unknown => return None,
+            };
+            let entities: Vec<&Entity> = ids.iter().filter_map(|id| home.entity(id)).collect();
+            let mut turn = Turn::default();
+            let text = describe(&entities, &mut turn);
+            memory.record(turn);
+            Some(Reply::direct(text))
+        }
+    }
+}
+
+/// "Which one: Office AC or Bedroom AC?" The choices are remembered for the answer.
+fn ask_which(home: &HomeModel, memory: &mut Memory, ids: &[String]) -> Reply {
+    let entities: Vec<&Entity> = ids.iter().filter_map(|id| home.entity(id)).collect();
+    let mut turn = Turn::default();
+    let labels: Vec<String> = entities
+        .iter()
+        .map(|entity| {
+            turn.refer(&entity.id, state_phrase(entity));
+            let shared = entities
+                .iter()
+                .any(|other| other.id != entity.id && other.name == entity.name);
+            let area = entity.area_id.as_deref().and_then(|id| home.area(id));
+            match area {
+                Some(area) if shared => format!("{} in {}", entity.name, area.name),
+                _ => entity.name.clone(),
+            }
+        })
+        .collect();
+    memory.record(turn);
+    let text = match labels.as_slice() {
+        [first, second] => format!("{first} or {second}"),
+        [rest @ .., last] => format!("{}, or {last}", rest.join(", ")),
+        [] => String::new(),
+    };
+    Reply::direct(format!("Which one: {text}?"))
+}
+
+/// Brightness for lights, temperature for climate devices. Mixed targets need the model.
+fn setting_action(home: &HomeModel, ids: &[String]) -> Option<Action> {
+    let domains: Vec<&str> = ids
+        .iter()
+        .filter_map(|id| home.entity(id))
+        .map(Entity::domain)
+        .collect();
+    if domains.iter().all(|domain| *domain == "light") {
+        Some(Action::SetBrightness)
+    } else if domains.iter().all(|domain| *domain == "climate") {
+        Some(Action::SetTemperature)
+    } else {
+        None
+    }
+}
+
+/// Validates every request, asks for confirmation if any is sensitive, then executes.
+/// `done` replaces the result lines when every change is verified.
+pub async fn run<A: HomeApi>(
+    home: &Home<'_, A>,
+    memory: &mut Memory,
+    requests: Vec<ControlRequest>,
+    done: Option<&str>,
+) -> Reply {
+    let plans = match plan_all(home.cache, &requests) {
+        Ok(plans) => plans,
+        Err(error) => {
+            log::info!("request rejected: {error}");
+            return Reply::direct(rejection(&error));
+        }
+    };
+    if plans.iter().any(|plan| plan.requires_confirmation) {
+        return Reply {
+            confirmation: requests,
+            ..Reply::direct(confirmation_prompt(&plans))
+        };
+    }
+    let mut reply = Reply::direct("");
+    let mut turn = Turn::default();
+    let reports = execute_all(home, &plans, &mut turn, &mut reply.metrics).await;
+    memory.record(turn);
+    reply.text = match done {
+        Some(done) if reports.iter().all(ExecutionReport::all_done) => done.to_owned(),
+        _ => summary(&reports),
+    };
+    reply
+}
+
+pub fn plan_all(
+    cache: &HomeCache,
+    requests: &[ControlRequest],
+) -> Result<Vec<Plan>, ValidationError> {
+    let home = cache.read();
+    requests
+        .iter()
+        .map(|request| actions::plan(&home, request))
+        .collect()
+}
+
+pub async fn execute_all<A: HomeApi>(
+    home: &Home<'_, A>,
+    plans: &[Plan],
+    turn: &mut Turn,
+    metrics: &mut Metrics,
+) -> Vec<ExecutionReport> {
+    let mut reports = Vec::new();
+    for plan in plans {
+        let report = actions::execute(plan, home.api, home.cache).await;
+        record_execution(&report, home.cache, turn);
+        metrics.record(&report);
+        reports.push(report);
+    }
+    reports
+}
+
+/// Remembers what was acted on and, for entities that changed, their earlier state.
+pub fn record_execution(report: &ExecutionReport, cache: &HomeCache, turn: &mut Turn) {
+    let home = cache.read();
+    for outcome in &report.outcomes {
+        if let Some(entity) = home.entity(&outcome.id) {
+            turn.refer(&entity.id, state_phrase(entity));
+        }
+    }
+    for before in &report.previous {
+        let changed = home
+            .entity(&before.id)
+            .is_some_and(|now| now.state != before.state || now.attributes != before.attributes);
+        if changed {
+            turn.previous.push(before.clone());
+        }
+    }
+}
+
+pub fn summary(reports: &[ExecutionReport]) -> String {
+    reports
+        .iter()
+        .flat_map(ExecutionReport::summary)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn confirmation_prompt(plans: &[Plan]) -> String {
+    plans
+        .iter()
+        .filter(|plan| plan.requires_confirmation)
+        .map(|plan| {
+            let names: Vec<&str> = plan
+                .entities
+                .iter()
+                .map(|entity| entity.name.as_str())
+                .collect();
+            let verb = actions::verb(plan.action);
+            actions::capitalize(&format!("{verb} {}?", actions::list(&names)))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+async fn undo<A: HomeApi>(home: &Home<'_, A>, memory: &mut Memory) -> Reply {
+    if memory.last_action.is_empty() {
+        return Reply::direct("There's nothing to undo.");
+    }
+    let requests = match actions::restore(&home.cache.read(), &memory.last_action) {
+        Ok(requests) => requests,
+        Err(error) => {
+            log::info!("cannot undo: {error}");
+            return Reply::direct("I can't undo that.");
+        }
+    };
+    if requests.is_empty() {
+        return Reply::direct("It's already back to how it was.");
+    }
+    run(home, memory, requests, Some("Restored the previous state.")).await
+}
+
+async fn recheck<A: HomeApi>(home: &Home<'_, A>, memory: &mut Memory) -> Reply {
+    if memory.referenced.is_empty() {
+        return Reply::direct("What should I check?");
+    }
+    if let Err(error) = home.api.refresh_states().await {
+        log::warn!("could not refresh states: {error}");
+        return Reply::direct("I couldn't reach Home Assistant to check.");
+    }
+    let snapshot = home.cache.read();
+    let entities: Vec<&Entity> = memory
+        .referenced
+        .iter()
+        .filter_map(|reference| snapshot.entity(&reference.id))
+        .collect();
+    if entities.is_empty() {
+        return Reply::direct("I can't find that in Home Assistant anymore.");
+    }
+    let unchanged = memory.referenced.iter().all(|reference| {
+        snapshot
+            .entity(&reference.id)
+            .is_some_and(|entity| state_phrase(entity) == reference.reported)
+    });
+    let mut turn = Turn::default();
+    let description = describe(&entities, &mut turn);
+    let text = match (unchanged, entities.as_slice()) {
+        (true, [entity]) => format!("Yes, I checked. It's {}.", state_phrase(entity)),
+        (true, _) => format!("Yes, I checked. {description}"),
+        (false, _) => format!("I checked again. {description}"),
+    };
+    drop(snapshot);
+    memory.record(turn);
+    Reply::direct(text)
+}
+
+/// "Garage door is closed." Entities sharing a state are grouped into one sentence.
+fn describe(entities: &[&Entity], turn: &mut Turn) -> String {
+    let mut groups: Vec<(String, Vec<&str>)> = Vec::new();
+    for entity in entities {
+        let phrase = state_phrase(entity);
+        turn.refer(&entity.id, phrase.clone());
+        match groups.iter_mut().find(|(existing, _)| *existing == phrase) {
+            Some((_, names)) => names.push(&entity.name),
+            None => groups.push((phrase, vec![&entity.name])),
+        }
+    }
+    groups
+        .iter()
+        .map(|(phrase, names)| format!("{} {phrase}.", actions::subject(names)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn state_phrase(entity: &Entity) -> String {
+    if !entity.is_available() {
+        return "unavailable".into();
+    }
+    let state = entity.state.as_str();
+    match (entity.domain(), entity.device_class()) {
+        ("binary_sensor", Some("door" | "garage_door" | "window" | "opening")) => match state {
+            "on" => "open".into(),
+            "off" => "closed".into(),
+            other => other.into(),
+        },
+        ("sensor", _) => {
+            let unit = entity
+                .attributes
+                .get("unit_of_measurement")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            let space = if unit.starts_with(char::is_alphabetic) {
+                " "
+            } else {
+                ""
+            };
+            format!("{state}{space}{unit}")
+        }
+        ("climate", _) if state != "off" => format!("set to {}", state.replace('_', " ")),
+        _ => state.replace('_', " "),
+    }
+}
+
+fn rejection(error: &ValidationError) -> String {
+    device_limit(error).unwrap_or_else(|| "That can't be done right now.".into())
+}
+
+/// A user-facing reason when a device itself cannot do what was asked.
+pub fn device_limit(error: &ValidationError) -> Option<String> {
+    match error {
+        ValidationError::Unsupported { name, action } => Some(format!(
+            "{} can't {}.",
+            actions::capitalize(name),
+            action.replace('_', " ")
+        )),
+        ValidationError::Unavailable { name } => Some(format!(
+            "{} isn't available right now.",
+            actions::capitalize(name)
+        )),
+        _ => None,
+    }
+}

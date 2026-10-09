@@ -11,7 +11,7 @@ use crate::error::{AppError, CommandError};
 use crate::history::{self, Interaction};
 use crate::home_assistant::discovery::{self, DiscoveredInstance};
 use crate::home_assistant::{ConnectionStatus, HomeAssistant};
-use crate::inference::{Engine, EngineStatus, ModelSpec};
+use crate::inference::{Engine, EngineStatus, ModelSpec, Warmup};
 use crate::models::{ModelInfo, ModelManager};
 use crate::settings::{self, Settings};
 
@@ -95,7 +95,7 @@ impl AppState {
     fn home(&self) -> Home<'_, HomeAssistant> {
         Home {
             cache: self.home_assistant.cache(),
-            caller: &self.home_assistant,
+            api: &self.home_assistant,
             connected: self.home_assistant.status() == ConnectionStatus::Connected,
         }
     }
@@ -199,6 +199,33 @@ pub async fn select_model(state: State<'_, AppState>, id: String) -> Result<(), 
     Ok(state.engine.load(&spec).await?)
 }
 
+/// Called when Luna's window is shown, so the model is ready before the user asks.
+/// Failures are logged; the model status already tells the user if loading failed.
+#[tauri::command]
+pub async fn prepare_assistant(state: State<'_, AppState>) -> Result<(), CommandError> {
+    let spec = match state
+        .settings()
+        .and_then(|settings| state.model_spec(&settings))
+    {
+        Ok(spec) => spec,
+        Err(AppError::NoActiveModel) => return Ok(()),
+        Err(error) => {
+            log::warn!("cannot prepare the assistant: {error}");
+            return Ok(());
+        }
+    };
+    let started = std::time::Instant::now();
+    match assistant::warm_up(&state.engine, &spec, state.home()).await {
+        Ok(Warmup::AlreadyReady) => {}
+        Ok(warmup) => log::info!(
+            "assistant ready in {} ms ({warmup:?})",
+            started.elapsed().as_millis()
+        ),
+        Err(error) => log::error!("failed to prepare the assistant: {error}"),
+    }
+    Ok(())
+}
+
 #[tauri::command]
 pub async fn ask(state: State<'_, AppState>, text: String) -> Result<Interaction, CommandError> {
     let text = text.trim().to_owned();
@@ -212,16 +239,23 @@ pub async fn ask(state: State<'_, AppState>, text: String) -> Result<Interaction
         engine: &state.engine,
         spec: &spec,
     };
-    let reply = assistant::respond(&model, state.home(), &history, &text, &cancel).await?;
+    let mut memory = state.session.memory();
+    let result =
+        assistant::respond(&model, state.home(), &history, &mut memory, &text, &cancel).await;
+    state.session.remember(memory);
+    let reply = result?;
+    log::info!("request handled: {}", reply.metrics);
     let interaction = history::insert(
         &state.db(),
         &text,
         &reply.text,
         &reply.results,
-        reply.confirmation.is_some(),
+        !reply.confirmation.is_empty(),
     )?;
-    if let Some(request) = reply.confirmation {
-        state.session.await_confirmation(interaction.id, request);
+    if !reply.confirmation.is_empty() {
+        state
+            .session
+            .await_confirmation(interaction.id, reply.confirmation);
     }
     Ok(interaction)
 }
@@ -238,7 +272,13 @@ pub async fn confirm_action(
     confirmed: bool,
 ) -> Result<Interaction, CommandError> {
     let text = match (state.session.take_confirmation(id), confirmed) {
-        (Ok(request), true) => assistant::confirm(state.home(), &request).await.text,
+        (Ok(requests), true) => {
+            let mut memory = state.session.memory();
+            let reply = assistant::confirm(state.home(), &mut memory, &requests).await;
+            state.session.remember(memory);
+            log::info!("confirmation handled: {}", reply.metrics);
+            reply.text
+        }
         (Ok(_), false) => "Okay, nothing changed.".to_owned(),
         (Err(_), _) => "That request expired, so nothing changed.".to_owned(),
     };
@@ -252,6 +292,7 @@ pub fn list_interactions(state: State<'_, AppState>) -> Result<Vec<Interaction>,
 
 #[tauri::command]
 pub fn clear_history(state: State<'_, AppState>) -> Result<(), CommandError> {
+    state.session.forget();
     Ok(history::clear(&state.db())?)
 }
 

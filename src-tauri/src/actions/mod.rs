@@ -1,13 +1,15 @@
 //! Turns structured requests from the model into validated, verified Home Assistant calls.
 mod execute;
 mod resolve;
+mod restore;
 mod validate;
 
 use serde::Deserialize;
 
-pub use execute::{ExecutionReport, capitalize, execute, list, verb};
+pub use execute::{ExecutionReport, capitalize, execute, list, subject, verb};
 pub use resolve::select;
-pub use validate::{Plan, plan};
+pub use restore::restore;
+pub use validate::{Plan, ValidationError, plan, supports_domain};
 
 /// Which entities a request refers to. Every ID must come from Home Assistant metadata.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]

@@ -190,6 +190,19 @@ impl Home {
         }
     }
 
+    /// Rebuilds names, areas, and visibility from new registries, keeping current states.
+    pub fn replace_registries(&mut self, registries: Registries) {
+        let states = std::mem::take(&mut self.entities)
+            .into_values()
+            .map(|entity| StateEntry {
+                entity_id: entity.id,
+                state: entity.state,
+                attributes: entity.attributes,
+            })
+            .collect();
+        *self = Self::build(registries, states);
+    }
+
     pub fn entity(&self, id: &str) -> Option<&Entity> {
         self.entities.get(id)
     }
@@ -248,6 +261,43 @@ pub mod fixtures {
 
     /// Two floors, five areas, and a mix of controllable and sensitive entities.
     pub fn home() -> Home {
+        let (registries, states) = home_data();
+        Home::build(registries, states)
+    }
+
+    /// The fixture home plus `extra` visible sensors, lights, and switches spread over its areas.
+    pub fn large_home(extra: usize) -> Home {
+        const AREAS: [&str; 5] = ["living_room", "kitchen", "hallway", "garage", "bedroom"];
+        let (mut registries, mut states) = home_data();
+        for index in 0..extra {
+            let area = AREAS[index % AREAS.len()];
+            let (id, value, attributes) = match index % 4 {
+                0 => (
+                    format!("sensor.{area}_battery_{index}"),
+                    "87",
+                    json!({"device_class": "battery", "unit_of_measurement": "%"}),
+                ),
+                1 => (
+                    format!("binary_sensor.{area}_motion_{index}"),
+                    "off",
+                    json!({"device_class": "motion"}),
+                ),
+                2 => (
+                    format!("light.{area}_spot_{index}"),
+                    "on",
+                    json!({"supported_color_modes": ["brightness"], "brightness": 200}),
+                ),
+                _ => (format!("switch.{area}_outlet_{index}"), "off", json!({})),
+            };
+            registries
+                .entities
+                .push(entity_entry(&id, Some(area), None));
+            states.push(state(&id, value, attributes));
+        }
+        Home::build(registries, states)
+    }
+
+    fn home_data() -> (Registries, Vec<StateEntry>) {
         let floor = |id: &str, name: &str| FloorEntry {
             floor_id: id.into(),
             name: name.into(),
@@ -345,7 +395,7 @@ pub mod fixtures {
             state("switch.hidden_relay", "on", json!({})),
             state("switch.kitchen_child_lock", "off", json!({})),
         ];
-        Home::build(registries, states)
+        (registries, states)
     }
 }
 
@@ -354,6 +404,7 @@ mod tests {
     use serde_json::json;
 
     use super::fixtures::{home, state};
+    use super::{AreaEntry, EntityEntry, Registries};
 
     #[test]
     fn entity_area_falls_back_to_device_area() {
@@ -381,6 +432,41 @@ mod tests {
         let kitchen = home.entity("light.kitchen").unwrap();
         assert_eq!(kitchen.state, "off");
         assert_eq!(kitchen.area_id.as_deref(), Some("kitchen"));
+    }
+
+    #[test]
+    fn replacing_registries_keeps_states_and_updates_metadata() {
+        let mut home = home();
+        home.apply_state(
+            "light.kitchen",
+            Some(state("light.kitchen", "off", json!({}))),
+        );
+        let mut registries = Registries {
+            floors: vec![],
+            areas: vec![AreaEntry {
+                area_id: "kitchen".into(),
+                name: "Cook Room".into(),
+                aliases: vec![],
+                floor_id: None,
+            }],
+            devices: vec![],
+            entities: vec![],
+        };
+        registries.entities.push(EntityEntry {
+            entity_id: "light.kitchen".into(),
+            name: None,
+            area_id: Some("kitchen".into()),
+            device_id: None,
+            aliases: vec!["stove light".into()].into_iter().map(Some).collect(),
+            hidden_by: None,
+            entity_category: None,
+        });
+        home.replace_registries(registries);
+        let kitchen = home.entity("light.kitchen").unwrap();
+        assert_eq!(kitchen.state, "off");
+        assert_eq!(kitchen.aliases, ["stove light"]);
+        assert_eq!(home.area("kitchen").unwrap().name, "Cook Room");
+        assert!(home.entity("light.bedroom").is_some());
     }
 
     #[test]

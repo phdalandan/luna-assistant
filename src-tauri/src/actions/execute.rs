@@ -1,13 +1,14 @@
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
+use futures_util::future::join_all;
 use serde_json::Value;
 use tokio::time::Instant;
 
 use super::Action;
 use super::validate::Plan;
 use crate::home_assistant::model::Entity;
-use crate::home_assistant::{HomeCache, ServiceCaller};
+use crate::home_assistant::{HomeApi, HomeCache};
 
 const VERIFY_TIMEOUT: Duration = Duration::from_secs(8);
 const BRIGHTNESS_TOLERANCE: f64 = 3.0;
@@ -23,6 +24,7 @@ pub enum Outcome {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EntityOutcome {
+    pub id: String,
     pub name: String,
     pub outcome: Outcome,
 }
@@ -33,6 +35,10 @@ pub struct ExecutionReport {
     pub value: Option<f64>,
     pub outcomes: Vec<EntityOutcome>,
     pub left_out: Vec<String>,
+    /// States from before the action for every entity it was sent to, used to undo it.
+    pub previous: Vec<Entity>,
+    pub service_time: Duration,
+    pub verify_time: Duration,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -43,11 +49,7 @@ enum Check {
 }
 
 /// Runs the plan's service calls, then waits for state changes that confirm each one.
-pub async fn execute(
-    plan: &Plan,
-    caller: &impl ServiceCaller,
-    cache: &HomeCache,
-) -> ExecutionReport {
+pub async fn execute(plan: &Plan, api: &impl HomeApi, cache: &HomeCache) -> ExecutionReport {
     let before: HashMap<String, Entity> = {
         let home = cache.read();
         plan.entities
@@ -56,13 +58,16 @@ pub async fn execute(
             .collect()
     };
     let mut changes = cache.subscribe();
+    let started = Instant::now();
+    let results = join_all(plan.calls.iter().map(|call| api.call_service(call))).await;
     let mut failed = HashSet::new();
-    for call in &plan.calls {
-        if let Err(error) = caller.call_service(call).await {
+    for (call, result) in plan.calls.iter().zip(results) {
+        if let Err(error) = result {
             log::error!("{}.{} failed: {error}", call.domain, call.service);
             failed.extend(call.entity_ids.iter().cloned());
         }
     }
+    let service_time = started.elapsed();
 
     let checks = |cache: &HomeCache| -> HashMap<String, Check> {
         let home = cache.read();
@@ -79,19 +84,22 @@ pub async fn execute(
             .collect()
     };
 
+    // Moving devices are reported as in progress rather than waited on.
     let deadline = Instant::now() + VERIFY_TIMEOUT;
     let mut results = checks(cache);
-    while results.values().any(|check| *check != Check::Satisfied) {
+    while results.values().any(|check| *check == Check::Pending) {
         match tokio::time::timeout_at(deadline, changes.changed()).await {
             Ok(Ok(())) => results = checks(cache),
             _ => break,
         }
     }
+    let verify_time = started.elapsed() - service_time;
 
     let outcomes = plan
         .entities
         .iter()
         .map(|planned| EntityOutcome {
+            id: planned.id.clone(),
             name: planned.name.clone(),
             outcome: match results.get(&planned.id) {
                 None => Outcome::Failed,
@@ -106,6 +114,14 @@ pub async fn execute(
         value: plan.value,
         outcomes,
         left_out: plan.left_out.clone(),
+        previous: plan
+            .entities
+            .iter()
+            .filter(|planned| !failed.contains(&planned.id))
+            .filter_map(|planned| before.get(&planned.id).cloned())
+            .collect(),
+        service_time,
+        verify_time,
     }
 }
 
@@ -176,9 +192,8 @@ impl ExecutionReport {
         }
         let moving = names(Outcome::InProgress);
         if !moving.is_empty() {
-            let verb = if moving.len() == 1 { "is" } else { "are" };
             let progress = progress_word(self.action);
-            lines.push(format!("{} {verb} {progress}.", capitalize(&list(&moving))));
+            lines.push(format!("{} {progress}.", subject(&moving)));
         }
         let unconfirmed = names(Outcome::NotConfirmed);
         if !unconfirmed.is_empty() {
@@ -193,6 +208,12 @@ impl ExecutionReport {
             lines.push(format!("Left out {}.", list(&left_out)));
         }
         lines
+    }
+
+    pub fn all_done(&self) -> bool {
+        self.outcomes
+            .iter()
+            .all(|outcome| outcome.outcome == Outcome::Done)
     }
 
     /// Result text for the model so it can describe what actually happened.
@@ -217,13 +238,28 @@ impl ExecutionReport {
     }
 
     fn done_line(&self, names: &[&str]) -> String {
-        let target = list(names);
-        match (self.action, self.value) {
-            (Action::SetBrightness, Some(value)) => format!("Set {target} to {}%.", value.round()),
-            (Action::SetTemperature, Some(value)) => format!("Set {target} to {value}°."),
-            (action, _) => format!("{} {target}.", past_tense(action)),
-        }
+        let state = match (self.action, self.value) {
+            (Action::Activate, _) => return format!("Started {}.", list(names)),
+            (Action::SetBrightness, Some(value)) if value > 0.0 => {
+                format!("at {}%", value.round())
+            }
+            (Action::SetTemperature, Some(value)) => format!("set to {value}°"),
+            (Action::TurnOn, _) => "on".into(),
+            (Action::TurnOff | Action::SetBrightness, _) => "off".into(),
+            (Action::Open, _) => "open".into(),
+            (Action::Close, _) => "closed".into(),
+            (Action::Lock, _) => "locked".into(),
+            (Action::Unlock, _) => "unlocked".into(),
+            (Action::SetTemperature, None) => "changed".into(),
+        };
+        format!("{} {state}.", subject(names))
     }
+}
+
+/// "Kitchen is" or "Kitchen and hallway are", for the start of a sentence.
+pub fn subject(names: &[&str]) -> String {
+    let verb = if names.len() == 1 { "is" } else { "are" };
+    format!("{} {verb}", capitalize(&list(names)))
 }
 
 pub fn verb(action: Action) -> &'static str {
@@ -240,23 +276,10 @@ pub fn verb(action: Action) -> &'static str {
     }
 }
 
-fn past_tense(action: Action) -> &'static str {
-    match action {
-        Action::TurnOn => "Turned on",
-        Action::TurnOff => "Turned off",
-        Action::SetBrightness => "Changed the brightness of",
-        Action::SetTemperature => "Changed the temperature of",
-        Action::Open => "Opened",
-        Action::Close => "Closed",
-        Action::Lock => "Locked",
-        Action::Unlock => "Unlocked",
-        Action::Activate => "Started",
-    }
-}
-
 fn progress_word(action: Action) -> &'static str {
     match action {
-        Action::Open | Action::Unlock => "opening",
+        Action::Open => "opening",
+        Action::Unlock => "unlocking",
         Action::Close => "closing",
         Action::Lock => "locking",
         _ => "changing",
@@ -302,7 +325,7 @@ mod tests {
         calls: Mutex<Vec<ServiceCall>>,
     }
 
-    impl ServiceCaller for FakeHomeAssistant<'_> {
+    impl HomeApi for FakeHomeAssistant<'_> {
         async fn call_service(&self, call: &ServiceCall) -> Result<(), HaError> {
             self.calls.lock().unwrap().push(call.clone());
             if self.failing_services.contains(&call.domain) {
@@ -318,6 +341,10 @@ mod tests {
                     });
                 }
             }
+            Ok(())
+        }
+
+        async fn refresh_states(&self) -> Result<(), HaError> {
             Ok(())
         }
     }
@@ -373,7 +400,7 @@ mod tests {
         );
         assert_eq!(
             report.summary(),
-            ["Turned off kitchen, living room lamp, and tv plug."]
+            ["Kitchen, living room lamp, and tv plug are off."]
         );
         assert_eq!(cache.read().entity("light.hallway").unwrap().state, "on");
         let called: Vec<String> = fake
@@ -415,11 +442,17 @@ mod tests {
         assert_eq!(
             report.summary(),
             [
-                "Turned off kitchen and living room lamp.",
+                "Kitchen and living room lamp are off.",
                 "Couldn't turn off tv plug."
             ]
         );
         assert!(report.for_model().contains("tv plug: failed"));
+        let previous: Vec<&str> = report
+            .previous
+            .iter()
+            .map(|entity| entity.id.as_str())
+            .collect();
+        assert_eq!(previous, ["light.kitchen", "light.living_room_lamp"]);
     }
 
     #[tokio::test(start_paused = true)]
@@ -433,6 +466,10 @@ mod tests {
         let opening = fake(&cache, Some(("opening", json!({"device_class": "garage"}))));
         let report = execute(&plan, &opening, &cache).await;
         assert_eq!(report.summary(), ["Garage door is opening."]);
+        assert!(
+            report.verify_time < VERIFY_TIMEOUT,
+            "moving devices should not wait for the timeout"
+        );
     }
 
     #[tokio::test]
@@ -442,7 +479,7 @@ mod tests {
         let plan = plan(&cache.read(), &request).unwrap();
         let attributes = json!({"brightness": 102, "supported_color_modes": ["brightness"]});
         let report = execute(&plan, &fake(&cache, Some(("on", attributes))), &cache).await;
-        assert_eq!(report.summary(), ["Set hallway to 40%."]);
+        assert_eq!(report.summary(), ["Hallway is at 40%."]);
     }
 
     #[test]

@@ -158,6 +158,11 @@ fn needs_confirmation(entity: &Entity, action: Action) -> bool {
     }
 }
 
+/// Whether `action` can ever apply to entities in `domain`.
+pub fn supports_domain(action: Action, domain: &str) -> bool {
+    service_for(action, domain).is_some()
+}
+
 fn service_for(action: Action, domain: &str) -> Option<(&'static str, &'static str)> {
     const ON_OFF: [&str; 6] = [
         "light",

@@ -23,13 +23,21 @@ Voice modules (audio capture, wake word, speech-to-text) are created in Stage 3.
 ## Request flow
 
 ```
-text input ─▶ context builder (floors, areas, relevant entities) ─▶ llama.cpp (tools, constrained JSON)
-           ─▶ tool call ─▶ resolver (floors, areas, exclusions) ─▶ validator (existence, features,
-              values, protection, confirmation) ─▶ executor (Home Assistant WebSocket)
-           ─▶ verification against state_changed events ─▶ concise reply and result lines
+text input ─▶ router (Rust) ─┬─▶ recognised and unambiguous: time, undo, "are you sure", on/off/open/close/lock,
+                             │   state questions ─▶ validator ─▶ executor ─▶ verified reply (no model)
+                             └─▶ otherwise ─▶ llama.cpp (cached instructions, layout, tools + request context)
+                                 ─▶ tool calls ─▶ resolver ─▶ validator ─▶ executor ─▶ verified reply
 ```
 
-The model only sees two tools, `get_states` and `control`. It never names services. Rust maps each validated action to a fixed Home Assistant service, removes exclusions before anything runs, leaves out locks, alarms, and doors unless named directly, and asks for confirmation before unlocking or opening them. Success is reported only for states Home Assistant confirms.
+- **Router** (`assistant/route.rs`) handles a small grammar of commands, questions, and brightness or temperature settings. It acts only when the words resolve to exactly one entity, or to every matching device in one area for plurals like "kitchen lights". A device word alone ("the AC") means every device of that kind: one is acted on, two to four get "Which one: …?", more go to the model. Anything broad or with exceptions goes to the model.
+- **Model** sees two tools, `get_states` and `control`, and never names services. When it only calls `control`, the reply is built from the verified results without a second pass. `get_states` needs a second pass to answer; a read matching more than 25 entities returns counts by type and asks the model to narrow it, never a partial list. Calls that act on the same entity in conflicting ways are rejected before anything runs. Tool definitions are kept short (about 1,140 prefix tokens with instructions) because they are evaluated whenever the prompt cache is cold.
+- **Prompt layout.** The system message holds the instructions and the floor and area layout, followed by the tools. It only changes when Home Assistant's registries change, so llama.cpp reuses its cache. Per-request facts go in the user message: recently referenced entities with live states, up to 15 relevant entities, states before the last action (only when the request refers back, at most 10), and the Home Assistant time when asked. When a request names a kind of device, room words in entity names do not pull in other kinds. The tool schema keeps its declared property order (`serde_json` `preserve_order`) because llama.cpp's grammar enforces it.
+- **Conversation memory** (`assistant/session.rs`) is kept in Rust for 10 minutes: the entities the last turn referred to with what Luna reported, and states from before the last action. "Revert that" restores those states through the validator, so unlocking or opening still asks for confirmation. Remembered states are never presented as current; replies always read the live cache, and "are you sure" fetches every state from Home Assistant again.
+- **Time** comes from a Home Assistant clock sensor such as Time & Date's `sensor.time`, never from the computer. Hidden entities, timestamp sensors, and UTC clocks are ignored. If visible clocks disagree, Luna asks the user to hide the extra ones.
+- **Cache.** One WebSocket connection loads the registries and all states once, then `state_changed` events keep states current. Registry events reload only the four registries, alongside event handling, and rebuild metadata over the cached states; a registry event during a reload queues one more reload.
+- **Execution.** Service calls for one plan run concurrently. Verification waits on `state_changed` events and stops as soon as every device is confirmed or reports it is moving.
+- **Metrics.** Each request logs its route, model passes, prompt and cached tokens, prompt and generation time, service call time, and verification time. Every model tool call and every rejection reason is logged.
+- **Honest replies.** If the model's action is rejected because the device cannot do it, the reply says so even when another action succeeded. The out-of-scope reply is never used after a tool call. The window warm-up runs only when the model is not already loaded, so it never evicts a conversation in progress.
 
 ## Local inference
 
@@ -47,10 +55,12 @@ Runtime details:
 - **Version:** llama.cpp tag `b11517`, commit `8a1a9b5126126e5228b95fa909d4b08fac65e8b3`, built from source by `scripts/build-llama-server.sh`, which verifies the commit before building. Static libraries, no network features, no web UI.
 - **macOS (Apple Silicon):** Metal with the shader library embedded. All layers run on the GPU.
 - **Windows x64:** CPU backend for AVX2 processors (Intel 2013 and later, AMD 2015 and later), statically linked C runtime, no OpenMP dependency.
-- **One model at a time.** Loads are serialised; switching stops the previous server before starting the next. The model loads on first use and unloads after 5 minutes idle, so Luna holds no model memory while idle.
+- **One model at a time.** Loads are serialised; switching stops the previous server before starting the next. The model loads when Luna's window is shown or focused (and evaluates the shared prompt prefix), or on first use, and unloads after 5 minutes idle, so Luna holds no model memory while idle.
 - **Process lifetime.** Quitting unloads the model. On Windows the server is in a job object that the OS kills with Luna. On macOS SIGTERM triggers a clean quit, and any server left by a crash is stopped on the next launch (process ID recorded, name checked before stopping).
 - **Cancellation.** Dropping the HTTP request makes the server cancel generation. Execution of validated actions is never cancelled midway.
-- **Thinking.** Qwen3 receives `enable_thinking: false` through the chat template. Any reasoning text that still appears is stripped.
+- **Saved prompt.** The server runs with `--slot-save-path` in `<app data>/prompt-cache`. After the shared prompt (instructions, layout, tools) is first evaluated, its KV cache (about 180 MB) is saved under a SHA-256 of the model, context length, system message, and tools. The next load restores it instead of evaluating it again (measured on an M2: ready in 1.1 s instead of 10.3 s). Only the current file is kept. A missing or unusable file means the prompt is evaluated as usual.
+- **Thinking.** Qwen3 receives `enable_thinking: false` through the chat template, which prefills an empty think block. Verified with raw output (`--reasoning-format none`): 23 generated tokens with thinking off versus 395 with it on for the same question. Any reasoning text that still appears is stripped.
+- **Output cap.** Replies are limited to 256 tokens; tool calls and one-sentence answers need far fewer.
 
 Optional GPU acceleration on Windows (Vulkan or CUDA) was not implemented. It would add one runtime per backend, larger installers, and driver-dependent failures. It should be evaluated separately with measurements on real hardware.
 

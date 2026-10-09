@@ -28,6 +28,7 @@ export const api = {
   cancelDownload: (id: string) => invoke<null>("cancel_download", { id }),
   deleteModel: (id: string) => invoke<null>("delete_model", { id }),
   selectModel: (id: string) => invoke<null>("select_model", { id }),
+  prepareAssistant: () => invoke<null>("prepare_assistant"),
   ask: (text: string) => invoke<Interaction>("ask", { text }),
   cancelRequest: () => invoke<null>("cancel_request"),
   confirmAction: (id: number, confirmed: boolean) =>

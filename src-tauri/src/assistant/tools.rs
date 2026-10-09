@@ -6,7 +6,8 @@ use crate::inference::FunctionCall;
 pub const GET_STATES: &str = "get_states";
 pub const CONTROL: &str = "control";
 
-const DOMAINS: [&str; 14] = [
+/// Device types the model can read. Control only offers the ones it can change.
+const READABLE_DOMAINS: [&str; 14] = [
     "light",
     "switch",
     "fan",
@@ -16,12 +17,13 @@ const DOMAINS: [&str; 14] = [
     "lock",
     "scene",
     "script",
+    "input_boolean",
     "sensor",
     "binary_sensor",
-    "input_boolean",
     "alarm_control_panel",
     "person",
 ];
+const CONTROLLABLE_DOMAINS: usize = 10;
 
 #[derive(Debug, PartialEq)]
 pub enum ToolRequest {
@@ -30,16 +32,17 @@ pub enum ToolRequest {
 }
 
 /// The only tools offered to the model. Both are interpreted and validated in Rust.
+/// Every token here is evaluated whenever the prompt cache is cold, so descriptions stay short.
 pub fn definitions() -> Value {
     json!([
         {
             "type": "function",
             "function": {
                 "name": GET_STATES,
-                "description": "Read the current state of devices and sensors. Use it to answer questions and to find entity IDs.",
+                "description": "Read states that are not in the request context.",
                 "parameters": {
                     "type": "object",
-                    "properties": { "target": target_schema() },
+                    "properties": { "target": target_schema(&READABLE_DOMAINS) },
                     "required": ["target"]
                 }
             }
@@ -48,20 +51,13 @@ pub fn definitions() -> Value {
             "type": "function",
             "function": {
                 "name": CONTROL,
-                "description": "Change devices. Luna validates the request, skips devices that cannot do the action, and reports verified results.",
+                "description": "Change devices. Activate runs scenes and scripts.",
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "action": {
-                            "type": "string",
-                            "enum": Action::ALL.map(Action::name),
-                            "description": "set_brightness takes a percentage, set_temperature a target temperature, activate runs scenes and scripts."
-                        },
-                        "target": target_schema(),
-                        "value": {
-                            "type": "number",
-                            "description": "Only for set_brightness (0 to 100) and set_temperature."
-                        }
+                        "action": {"type": "string", "enum": Action::ALL.map(Action::name)},
+                        "target": target_schema(&READABLE_DOMAINS[..CONTROLLABLE_DOMAINS]),
+                        "value": {"type": "number", "description": "Brightness percentage or target temperature."}
                     },
                     "required": ["action", "target"]
                 }
@@ -70,20 +66,19 @@ pub fn definitions() -> Value {
     ])
 }
 
-fn target_schema() -> Value {
-    let ids = |description: &str| json!({"type": "array", "items": {"type": "string"}, "description": description});
+fn target_schema(domains: &[&str]) -> Value {
+    let ids = json!({"type": "array", "items": {"type": "string"}});
     json!({
         "type": "object",
-        "description": "Which devices. Combine fields as needed. Exclusions are removed before anything runs.",
         "properties": {
-            "everywhere": {"type": "boolean", "description": "The whole home."},
-            "floors": ids("Floor IDs from the home summary."),
-            "areas": ids("Area IDs from the home summary."),
-            "entities": ids("Entity IDs from the home summary or get_states results."),
-            "domains": {"type": "array", "items": {"type": "string", "enum": DOMAINS}, "description": "Limit to these device types."},
-            "device_classes": ids("Limit to device classes such as temperature, garage, or motion."),
-            "exclude_areas": ids("Area IDs to leave out."),
-            "exclude_entities": ids("Entity IDs to leave out.")
+            "everywhere": {"type": "boolean"},
+            "floors": ids,
+            "areas": ids,
+            "entities": ids,
+            "domains": {"type": "array", "items": {"type": "string", "enum": domains}},
+            "device_classes": {"type": "array", "items": {"type": "string"}, "description": "Such as temperature, garage, or motion."},
+            "exclude_areas": ids,
+            "exclude_entities": ids
         }
     })
 }
@@ -161,6 +156,16 @@ mod tests {
             json!({"action": "turn_on", "target": {"entities": ["light.kitchen"]}, "service": "light.toggle"}),
         ));
         assert!(result.is_err());
+    }
+
+    /// llama.cpp's tool grammar enforces property order, so locations must precede exclusions.
+    #[test]
+    fn schema_properties_keep_their_declared_order() {
+        let text = definitions()[1]["function"]["parameters"].to_string();
+        let position = |key: &str| text.find(&format!("\"{key}\":{{")).unwrap();
+        assert!(position("floors") < position("exclude_entities"));
+        assert!(position("action") < position("target"));
+        assert!(position("target") < position("value"));
     }
 
     #[test]

@@ -74,6 +74,7 @@ pub fn run() {
             let engine = Engine::new(
                 Engine::bundled_runtime()?,
                 data_dir.join("llama-server.pid"),
+                data_dir.join("prompt-cache"),
             );
             let state = AppState::new(db, engine, models);
             state.connect_home_assistant(&state.settings()?.home_assistant_url);
@@ -100,6 +101,7 @@ pub fn run() {
             commands::cancel_download,
             commands::delete_model,
             commands::select_model,
+            commands::prepare_assistant,
             commands::ask,
             commands::cancel_request,
             commands::confirm_action,

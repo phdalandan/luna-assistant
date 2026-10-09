@@ -42,6 +42,7 @@ export function mockBackend(overrides: Record<string, Handler> = {}) {
     get_status: () => status,
     list_models: () => [model()],
     list_interactions: () => [],
+    prepare_assistant: () => null,
     "plugin:event|listen": () => 1,
     "plugin:event|unlisten": () => undefined,
   };

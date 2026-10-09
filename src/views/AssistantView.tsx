@@ -25,6 +25,19 @@ export function AssistantView() {
     end.current?.scrollIntoView?.({ block: "end" });
   }, [interactions, pending, error]);
 
+  const activeModelId = models?.find((model) => model.active)?.id;
+  useEffect(() => {
+    if (!activeModelId) return;
+    const prepare = () => {
+      api
+        .prepareAssistant()
+        .catch((err: unknown) => setError(errorMessage(err)));
+    };
+    prepare();
+    window.addEventListener("focus", prepare);
+    return () => window.removeEventListener("focus", prepare);
+  }, [activeModelId]);
+
   if (!models) {
     return null;
   }

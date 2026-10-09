@@ -11,19 +11,20 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
-use super::{ChatMessage, InferenceError, ModelSpec};
+use super::{ChatMessage, Completion, InferenceError, ModelSpec, Timings};
 
 const LOAD_TIMEOUT: Duration = Duration::from_secs(180);
 const HEALTH_INTERVAL: Duration = Duration::from_millis(250);
 /// Generation on CPU-only machines can take minutes for long answers.
 const CHAT_TIMEOUT: Duration = Duration::from_secs(240);
-const MAX_RESPONSE_TOKENS: u32 = 1024;
 const STDERR_LINES: usize = 30;
 
 /// A running llama.cpp server holding one model in memory.
 pub struct Server {
     pub model_id: String,
     pub context_length: u32,
+    /// The shared prompt prefix is in the KV cache, restored from disk or evaluated.
+    pub prompt_ready: bool,
     child: Child,
     base_url: String,
     api_key: String,
@@ -31,7 +32,12 @@ pub struct Server {
 }
 
 impl Server {
-    pub async fn start(runtime: &Path, spec: &ModelSpec) -> Result<Self, InferenceError> {
+    /// `prompt_cache` is where evaluated prompt prefixes are saved for the next launch.
+    pub async fn start(
+        runtime: &Path,
+        spec: &ModelSpec,
+        prompt_cache: &Path,
+    ) -> Result<Self, InferenceError> {
         if !runtime.is_file() {
             return Err(InferenceError::RuntimeMissing(
                 runtime.display().to_string(),
@@ -51,6 +57,8 @@ impl Server {
             .args(["--host", "127.0.0.1", "--port", &port.to_string()])
             .args(["--parallel", "1", "--cache-ram", "0", "--fit", "off"])
             .args(["--no-webui", "--offline", "--jinja"])
+            .arg("--slot-save-path")
+            .arg(prompt_cache)
             .args(gpu_arguments())
             .env("LLAMA_API_KEY", &api_key)
             .stdin(Stdio::null())
@@ -72,6 +80,7 @@ impl Server {
         let mut server = Self {
             model_id: spec.id.clone(),
             context_length: spec.context_length,
+            prompt_ready: false,
             child,
             base_url: format!("http://127.0.0.1:{port}"),
             api_key,
@@ -139,13 +148,15 @@ impl Server {
         spec: &ModelSpec,
         messages: &[ChatMessage],
         tools: &Value,
-    ) -> Result<ChatMessage, InferenceError> {
+        max_tokens: u32,
+    ) -> Result<Completion, InferenceError> {
         let mut body = json!({
             "messages": messages.iter().map(ChatMessage::to_wire).collect::<Vec<_>>(),
             "tools": tools,
             "tool_choice": "auto",
+            "parallel_tool_calls": true,
             "stream": false,
-            "max_tokens": MAX_RESPONSE_TOKENS,
+            "max_tokens": max_tokens,
             "temperature": spec.chat.temperature,
             "top_p": spec.chat.top_p,
             "top_k": spec.chat.top_k,
@@ -179,7 +190,50 @@ impl Server {
                 body["error"]
             )));
         }
-        ChatMessage::from_wire(&body["choices"][0]["message"])
+        let timings = Timings::from_wire(&body["timings"]);
+        log::info!(
+            "inference: prompt {} tokens ({} cached) in {:.0} ms, generated {} tokens in {:.0} ms",
+            timings.prompt_tokens,
+            timings.cached_tokens,
+            timings.prompt_ms,
+            timings.generated_tokens,
+            timings.generation_ms
+        );
+        Ok(Completion {
+            message: ChatMessage::from_wire(&body["choices"][0]["message"])?,
+            timings,
+        })
+    }
+
+    /// Saves the slot's KV cache to `file` in the prompt cache directory.
+    pub async fn save_prompt(&self, file: &str) -> Result<(), InferenceError> {
+        self.slot_action("save", file).await
+    }
+
+    /// Loads a KV cache saved by `save_prompt` into the slot.
+    pub async fn restore_prompt(&self, file: &str) -> Result<(), InferenceError> {
+        self.slot_action("restore", file).await
+    }
+
+    async fn slot_action(&self, action: &str, file: &str) -> Result<(), InferenceError> {
+        let response = self
+            .http
+            .post(format!("{}/slots/0?action={action}", self.base_url))
+            .bearer_auth(&self.api_key)
+            .timeout(CHAT_TIMEOUT)
+            .json(&json!({ "filename": file }))
+            .send()
+            .await
+            .map_err(|error| InferenceError::Request(error.to_string()))?;
+        let status = response.status();
+        if status.is_success() {
+            Ok(())
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            Err(InferenceError::Request(format!(
+                "{action} {status}: {body}"
+            )))
+        }
     }
 
     pub async fn shutdown(mut self) {

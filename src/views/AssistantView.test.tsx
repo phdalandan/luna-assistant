@@ -13,7 +13,7 @@ function interaction(overrides: Partial<Interaction> = {}): Interaction {
     createdAt: Date.now(),
     request: "Turn off the kitchen light",
     response: "The kitchen light is off.",
-    results: ["Turned off Kitchen Light."],
+    results: ["Kitchen Light is off."],
     awaitingConfirmation: false,
     ...overrides,
   };
@@ -52,7 +52,18 @@ describe("AssistantView", () => {
     });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     expect(await screen.findByText("The kitchen light is off.")).toBeTruthy();
-    expect(screen.getByText("Turned off Kitchen Light.")).toBeTruthy();
+    expect(screen.getByText("Kitchen Light is off.")).toBeTruthy();
+  });
+
+  it("prepares the model when shown and when focused again", async () => {
+    const calls = mockBackend({ list_models: active });
+    render(<AssistantView />);
+    await screen.findByLabelText("Message");
+    const prepared = () =>
+      calls.filter((call) => call.cmd === "prepare_assistant").length;
+    expect(prepared()).toBe(1);
+    fireEvent.focus(window);
+    expect(prepared()).toBe(2);
   });
 
   it("asks for confirmation before sensitive actions", async () => {
@@ -67,13 +78,13 @@ describe("AssistantView", () => {
       list_interactions: () => [pending],
       confirm_action: () => ({
         ...pending,
-        response: "Unlocked Front Door.",
+        response: "Front Door is unlocked.",
         awaitingConfirmation: false,
       }),
     });
     render(<AssistantView />);
     fireEvent.click(await screen.findByRole("button", { name: "Confirm" }));
-    expect(await screen.findByText("Unlocked Front Door.")).toBeTruthy();
+    expect(await screen.findByText("Front Door is unlocked.")).toBeTruthy();
     expect(calls.find((call) => call.cmd === "confirm_action")?.args).toEqual({
       id: 1,
       confirmed: true,

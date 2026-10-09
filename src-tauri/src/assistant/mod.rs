@@ -1,37 +1,56 @@
-//! Runs a conversation turn: the model interprets, Rust validates and executes.
+//! Runs a conversation turn. Simple requests are handled in Rust; the model interprets the rest,
+//! and Rust validates and executes whatever it proposes.
+mod clock;
 mod context;
+mod direct;
+mod route;
+mod session;
 mod tools;
 
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::fmt;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
-use crate::actions::{self, ControlRequest, ExecutionReport, Plan};
+use crate::actions::{self, ControlRequest, ExecutionReport};
 use crate::history::{Interaction, now_millis};
-use crate::home_assistant::{HomeCache, ServiceCaller};
-use crate::inference::{ChatMessage, Engine, FunctionCall, InferenceError, ModelSpec, Role};
+use crate::home_assistant::{HomeApi, HomeCache};
+use crate::inference::{
+    ChatMessage, Completion, Engine, FunctionCall, InferenceError, ModelSpec, Role, Timings,
+    ToolCall, Warmup,
+};
+use session::{MAX_REFERENCED, Turn};
+pub use session::{Memory, Session};
 use tools::ToolRequest;
 
-const MAX_STEPS: usize = 6;
-const HISTORY_TURNS: usize = 4;
+const MAX_STEPS: usize = 4;
+const OUT_OF_SCOPE: &str = "I can only help with your home.";
+const HISTORY_TURNS: usize = 3;
 const HISTORY_WINDOW_MS: i64 = 10 * 60 * 1000;
-const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
 
-const INSTRUCTIONS: &str = "You are Luna, a private voice assistant for a Home Assistant smart home. \
-Reply in one short, natural sentence. Do not repeat the request back. Never use em dashes.
+const INSTRUCTIONS: &str = "You are Luna, the voice assistant for one Home Assistant home. \
+You help only with this home: its devices, sensors, rooms, and their states. \
+Requests like \"I'm heading to bed\" or \"it's too warm\" are about the home. \
+For questions unrelated to the home, reply exactly: I can only help with your home. Never use that reply after calling a tool.
 
 Rules:
-- Use get_states to answer questions about the home. Use control to change devices.
-- Only use floor, area, and entity IDs from the home summary or tool results. Never invent IDs.
-- For everything in a place, target the floor or area; Luna skips devices that cannot do the action. \
-Put exceptions in exclude_entities or exclude_areas.
-- Only say a device changed if the control result says it was done and verified. \
-Mention anything that failed, was not confirmed, or was left out.
-- If a request is ambiguous or a target is unclear, ask one short question instead of guessing.
-- Luna asks the user to confirm unlocking and opening doors itself. Just call control.
-- Answer general questions briefly without tools.";
+- Use control to change devices. Use get_states for states not listed in the request context.
+- The request context shows the true current states. Never say something changed unless control changed it in this turn. \
+If the user says something did not happen, check the current state and call control again.
+- Only use floor, area, and entity IDs from the home layout, the request context, or tool results. Never invent IDs or devices.
+- For everything in a place, target that area or floor. Add domains when the request is about one kind of device. \
+For exceptions, use one control call with exclude_entities or exclude_areas, never a second call that reverses the first.
+- Examples: \"turn off everything downstairs except the hallway light\" is control turn_off with target {\"floors\": [\"downstairs\"], \"exclude_entities\": [\"light.hallway\"]}. \
+\"It's too bright in the living room\" is control set_brightness with target {\"areas\": [\"living_room\"], \"domains\": [\"light\"]} and a lower value.
+- For routines like going to bed, act on the obvious devices in the request context, or ask one short question if unsure.
+- \"It\", \"that\", and \"them\" mean the recently referenced entities.
+- To undo the last action, use control to restore the states listed before the last action.
+- If a request is ambiguous, or a tool call is rejected and you cannot fix it, ask one short question.
+- Luna asks the user to confirm unlocking and opening doors. Just call control.
+- Never state the time unless the request context gives it.
+- Reply in one short sentence. Do not repeat the request. Never use em dashes.";
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AssistantError {
@@ -47,12 +66,72 @@ pub enum AssistantError {
     ConfirmationExpired,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Route {
+    /// Answered in Rust without the model.
+    #[default]
+    Direct,
+    Model,
+}
+
+/// Where the time went for one request. Logged, never shown to users.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Metrics {
+    pub route: Route,
+    pub passes: u32,
+    pub inference: Timings,
+    pub service_time: Duration,
+    pub verify_time: Duration,
+    pub total: Duration,
+}
+
+impl Metrics {
+    fn record(&mut self, report: &ExecutionReport) {
+        self.service_time += report.service_time;
+        self.verify_time += report.verify_time;
+    }
+}
+
+impl fmt::Display for Metrics {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let inference = &self.inference;
+        write!(
+            f,
+            "route {:?}, total {} ms, {} model passes, prompt {} tokens ({} cached) in {:.0} ms, \
+             generated {} tokens in {:.0} ms, service calls {} ms, verification {} ms",
+            self.route,
+            self.total.as_millis(),
+            self.passes,
+            inference.prompt_tokens,
+            inference.cached_tokens,
+            inference.prompt_ms,
+            inference.generated_tokens,
+            inference.generation_ms,
+            self.service_time.as_millis(),
+            self.verify_time.as_millis(),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Reply {
     pub text: String,
+    /// Verified result lines shown under a reply the model wrote.
     pub results: Vec<String>,
-    /// Set when a sensitive action is waiting for the user to confirm it.
-    pub confirmation: Option<ControlRequest>,
+    /// Sensitive actions waiting for the user to confirm them.
+    pub confirmation: Vec<ControlRequest>,
+    pub metrics: Metrics,
+}
+
+impl Reply {
+    fn direct(text: impl Into<String>) -> Self {
+        Self {
+            text: text.into(),
+            results: Vec::new(),
+            confirmation: Vec::new(),
+            metrics: Metrics::default(),
+        }
+    }
 }
 
 /// Something that can answer a chat request. Production always uses the embedded engine.
@@ -61,7 +140,7 @@ pub trait Chat {
         &self,
         messages: &[ChatMessage],
         tools: &Value,
-    ) -> impl Future<Output = Result<ChatMessage, InferenceError>> + Send;
+    ) -> impl Future<Output = Result<Completion, InferenceError>> + Send;
 }
 
 pub struct EngineChat<'a> {
@@ -74,94 +153,239 @@ impl Chat for EngineChat<'_> {
         &self,
         messages: &[ChatMessage],
         tools: &Value,
-    ) -> Result<ChatMessage, InferenceError> {
+    ) -> Result<Completion, InferenceError> {
         self.engine.chat(self.spec, messages, tools).await
     }
 }
 
-pub struct Home<'a, C> {
+pub struct Home<'a, A> {
     pub cache: &'a HomeCache,
-    pub caller: &'a C,
+    pub api: &'a A,
     pub connected: bool,
 }
 
-pub async fn respond<C: ServiceCaller>(
+pub async fn respond<A: HomeApi>(
     model: &impl Chat,
-    home: Home<'_, C>,
+    home: Home<'_, A>,
     history: &[Interaction],
+    memory: &mut Memory,
+    request: &str,
+    cancel: &CancellationToken,
+) -> Result<Reply, AssistantError> {
+    let started = Instant::now();
+    let mut reply = match direct::handle(&home, memory, request).await {
+        Some(reply) => reply,
+        None => ask_model(model, &home, history, memory, request, cancel).await?,
+    };
+    reply.metrics.total = started.elapsed();
+    Ok(reply)
+}
+
+/// Loads the model and prepares the parts of the prompt that every request shares.
+pub async fn warm_up<A>(
+    engine: &Engine,
+    spec: &ModelSpec,
+    home: Home<'_, A>,
+) -> Result<Warmup, InferenceError> {
+    let messages = [
+        ChatMessage::new(Role::System, system_prompt(&home)),
+        ChatMessage::new(Role::User, "Hello"),
+    ];
+    engine.warm(spec, &messages, &tools::definitions()).await
+}
+
+/// Executes confirmed requests after validating them again against the current state.
+pub async fn confirm<A: HomeApi>(
+    home: Home<'_, A>,
+    memory: &mut Memory,
+    requests: &[ControlRequest],
+) -> Reply {
+    if !home.connected {
+        return Reply::direct("Home Assistant isn't connected, so nothing changed.");
+    }
+    let plans = match direct::plan_all(home.cache, requests) {
+        Ok(plans) => plans,
+        Err(error) => {
+            log::warn!("confirmed request is no longer valid: {error}");
+            return Reply::direct("That can't be done right now, so nothing changed.");
+        }
+    };
+    let mut reply = Reply::direct("");
+    let mut turn = Turn::default();
+    let reports = direct::execute_all(&home, &plans, &mut turn, &mut reply.metrics).await;
+    memory.record(turn);
+    reply.text = direct::summary(&reports);
+    reply
+}
+
+async fn ask_model<A: HomeApi>(
+    model: &impl Chat,
+    home: &Home<'_, A>,
+    history: &[Interaction],
+    memory: &mut Memory,
     request: &str,
     cancel: &CancellationToken,
 ) -> Result<Reply, AssistantError> {
     let tools = tools::definitions();
-    let mut messages = vec![ChatMessage::new(
-        Role::System,
-        system_prompt(&home, history, request),
-    )];
+    let mut messages = vec![ChatMessage::new(Role::System, system_prompt(home))];
     messages.extend(history_messages(history));
-    messages.push(ChatMessage::new(Role::User, request));
-    let mut results = Vec::new();
+    messages.push(ChatMessage::new(
+        Role::User,
+        user_prompt(home, memory, request),
+    ));
+    let mut reply = Reply {
+        metrics: Metrics {
+            route: Route::Model,
+            ..Metrics::default()
+        },
+        ..Reply::direct("")
+    };
+    let mut turn = Turn::default();
+    let mut prompts = Vec::new();
+    let mut notes: Vec<String> = Vec::new();
 
     for _ in 0..MAX_STEPS {
-        let reply = tokio::select! {
+        let completion = tokio::select! {
             biased;
             () = cancel.cancelled() => return Err(AssistantError::Cancelled),
-            reply = model.chat(&messages, &tools) => reply?,
+            completion = model.chat(&messages, &tools) => completion?,
         };
-        if reply.tool_calls.is_empty() {
-            let text = final_text(&reply.content, &results);
-            return Ok(Reply {
-                text,
-                results,
-                confirmation: None,
-            });
+        reply.metrics.passes += 1;
+        reply.metrics.inference.add(completion.timings);
+        let message = completion.message;
+        if message.tool_calls.is_empty() {
+            memory.record(turn);
+            let model_wrote = !strip_reasoning(&message.content).trim().is_empty();
+            reply.text = final_text(&message.content, &reply.results);
+            if !model_wrote && !notes.is_empty() {
+                reply.text = format!("{} {}", notes.join(" "), reply.text);
+            }
+            // A rejected tool call means the request was about the home, just not doable as asked.
+            if reply.metrics.passes > 1 && reply.text == OUT_OF_SCOPE {
+                reply.text = if notes.is_empty() {
+                    "I couldn't do that. Try naming the device and what to change.".into()
+                } else {
+                    notes.join(" ")
+                };
+            }
+            return Ok(reply);
         }
-        messages.push(reply.clone());
-        for call in &reply.tool_calls {
-            match run_tool(&call.function, &home).await {
-                ToolOutcome::Text(text) => messages.push(ChatMessage::tool_result(call, text)),
+        for call in &message.tool_calls {
+            log::info!(
+                "model called {} {}",
+                call.function.name,
+                call.function.arguments
+            );
+        }
+
+        messages.push(message.clone());
+        if let Some(conflict) = conflicting_calls(&message.tool_calls, home) {
+            log::info!("rejected conflicting tool calls: {conflict}");
+            for call in &message.tool_calls {
+                messages.push(ChatMessage::tool_result(call, conflict.clone()));
+            }
+            continue;
+        }
+        let mut needs_model = false;
+        for call in &message.tool_calls {
+            let content = match run_tool(&call.function, home, &mut turn).await {
+                ToolOutcome::Text(text) => {
+                    needs_model = true;
+                    text
+                }
+                ToolOutcome::Rejected { message, note } => {
+                    needs_model = true;
+                    notes.extend(note.filter(|note| !notes.contains(note)));
+                    message
+                }
                 ToolOutcome::Executed(report) => {
-                    results.extend(report.summary());
-                    messages.push(ChatMessage::tool_result(call, report.for_model()));
+                    reply.metrics.record(&report);
+                    reply.results.extend(report.summary());
+                    report.for_model()
                 }
                 ToolOutcome::NeedsConfirmation { prompt, request } => {
-                    return Ok(Reply {
-                        text: prompt,
-                        results,
-                        confirmation: Some(*request),
-                    });
+                    prompts.push(prompt);
+                    reply.confirmation.push(*request);
+                    "Waiting for the user to confirm.".into()
                 }
-            }
+            };
+            messages.push(ChatMessage::tool_result(call, content));
+        }
+        // Verified results already say what happened, so no second pass is needed.
+        if !needs_model || !reply.confirmation.is_empty() {
+            memory.record(turn);
+            reply.results.append(&mut prompts);
+            notes.append(&mut reply.results);
+            reply.text = notes.join(" ");
+            return Ok(reply);
         }
     }
+    memory.record(turn);
     Err(AssistantError::TooManySteps)
 }
 
-/// Executes a confirmed request after validating it again against the current state.
-pub async fn confirm<C: ServiceCaller>(home: Home<'_, C>, request: &ControlRequest) -> Reply {
-    let text = if !home.connected {
-        "Home Assistant isn't connected, so nothing changed.".to_owned()
-    } else {
-        let plan = actions::plan(&home.cache.read(), request);
-        match plan {
-            Ok(plan) => actions::execute(&plan, home.caller, home.cache)
-                .await
-                .summary()
-                .join(" "),
-            Err(error) => {
-                log::warn!("confirmed request is no longer valid: {error}");
-                "That can't be done right now, so nothing changed.".to_owned()
-            }
+/// Calls that leave the same entity in opposite states, such as turning a floor off and one
+/// light back on, would briefly change a device the user asked to leave alone.
+fn conflicting_calls<A>(calls: &[ToolCall], home: &Home<'_, A>) -> Option<String> {
+    let snapshot = home.cache.read();
+    let mut planned: HashMap<String, Vec<(actions::Action, Option<f64>)>> = HashMap::new();
+    for call in calls {
+        let Ok(ToolRequest::Control(request)) = tools::parse(&call.function) else {
+            continue;
+        };
+        let Ok(plan) = actions::plan(&snapshot, &request) else {
+            continue;
+        };
+        for entity in &plan.entities {
+            planned
+                .entry(entity.id.clone())
+                .or_default()
+                .push((plan.action, plan.value));
         }
-    };
-    Reply {
-        text,
-        results: Vec::new(),
-        confirmation: None,
     }
+    let mut conflicts: Vec<&str> = planned
+        .iter()
+        .filter(|(_, steps)| {
+            steps.iter().enumerate().any(|(index, first)| {
+                steps[index + 1..]
+                    .iter()
+                    .any(|second| opposed(*first, *second))
+            })
+        })
+        .map(|(id, _)| id.as_str())
+        .collect();
+    conflicts.sort_unstable();
+    (!conflicts.is_empty()).then(|| {
+        format!(
+            "Rejected, nothing changed: these calls conflict on {}. Use one call with exclude_entities for exceptions.",
+            conflicts.join(", ")
+        )
+    })
+}
+
+/// Turning on and setting brightness or temperature go together; on and off do not.
+fn opposed(first: (actions::Action, Option<f64>), second: (actions::Action, Option<f64>)) -> bool {
+    use actions::Action::*;
+    let leaves_on = |(action, value): (actions::Action, Option<f64>)| match action {
+        TurnOn | Open | Unlock => Some(true),
+        TurnOff | Close | Lock => Some(false),
+        SetBrightness => Some(value.is_some_and(|value| value > 0.0)),
+        SetTemperature | Activate => None,
+    };
+    let same_action_other_value = first.0 == second.0 && first.1 != second.1;
+    let opposite_states =
+        matches!((leaves_on(first), leaves_on(second)), (Some(a), Some(b)) if a != b);
+    same_action_other_value || opposite_states
 }
 
 enum ToolOutcome {
     Text(String),
+    /// A control call that failed validation, with a note for the user if the device itself
+    /// cannot do it, so a substitute action is never reported alone.
+    Rejected {
+        message: String,
+        note: Option<String>,
+    },
     Executed(ExecutionReport),
     NeedsConfirmation {
         prompt: String,
@@ -169,10 +393,17 @@ enum ToolOutcome {
     },
 }
 
-async fn run_tool<C: ServiceCaller>(call: &FunctionCall, home: &Home<'_, C>) -> ToolOutcome {
+async fn run_tool<A: HomeApi>(
+    call: &FunctionCall,
+    home: &Home<'_, A>,
+    turn: &mut Turn,
+) -> ToolOutcome {
     let request = match tools::parse(call) {
         Ok(request) => request,
-        Err(error) => return ToolOutcome::Text(error),
+        Err(error) => {
+            log::info!("tool call rejected: {error}");
+            return ToolOutcome::Text(error);
+        }
     };
     if !home.connected {
         return ToolOutcome::Text(
@@ -190,39 +421,70 @@ async fn run_tool<C: ServiceCaller>(call: &FunctionCall, home: &Home<'_, C>) -> 
                         .iter()
                         .map(|selected| selected.entity)
                         .collect();
+                    if entities.len() <= MAX_REFERENCED {
+                        for entity in &entities {
+                            turn.refer(&entity.id, direct::state_phrase(entity));
+                        }
+                    }
                     context::describe_states(&snapshot, &entities)
                 }
-                Err(error) => format!("Rejected: {error}"),
+                Err(error) => {
+                    log::info!("tool call rejected: {error}");
+                    format!("Rejected: {error}")
+                }
             })
         }
         ToolRequest::Control(request) => {
             let plan = actions::plan(&home.cache.read(), &request);
             match plan {
-                Err(error) => ToolOutcome::Text(format!("Rejected, nothing changed: {error}")),
+                Err(error) => {
+                    log::info!("tool call rejected: {error}");
+                    ToolOutcome::Rejected {
+                        message: format!("Rejected, nothing changed: {error}"),
+                        note: direct::device_limit(&error),
+                    }
+                }
                 Ok(plan) if plan.requires_confirmation => ToolOutcome::NeedsConfirmation {
-                    prompt: confirmation_prompt(&plan),
+                    prompt: direct::confirmation_prompt(std::slice::from_ref(&plan)),
                     request: Box::new(request),
                 },
                 Ok(plan) => {
-                    ToolOutcome::Executed(actions::execute(&plan, home.caller, home.cache).await)
+                    let report = actions::execute(&plan, home.api, home.cache).await;
+                    direct::record_execution(&report, home.cache, turn);
+                    ToolOutcome::Executed(report)
                 }
             }
         }
     }
 }
 
-fn system_prompt<C>(home: &Home<'_, C>, history: &[Interaction], request: &str) -> String {
+/// Instructions and the home layout. Identical across requests so the model reuses its cache.
+fn system_prompt<A>(home: &Home<'_, A>) -> String {
     if !home.connected {
         return format!("{INSTRUCTIONS}\n\nHome Assistant is not connected.");
     }
-    // Include the previous request so follow-ups like "turn it off" find the same devices.
-    let previous = history
-        .last()
-        .map_or("", |interaction| interaction.request.as_str());
-    let summary = context::summarize(&home.cache.read(), &format!("{previous} {request}"));
-    format!("{INSTRUCTIONS}\n\nHome summary:\n{summary}")
+    let layout = context::layout(&home.cache.read());
+    format!("{INSTRUCTIONS}\n\nHome layout:\n{layout}")
 }
 
+fn user_prompt<A>(home: &Home<'_, A>, memory: &Memory, request: &str) -> String {
+    if !home.connected {
+        return request.to_owned();
+    }
+    let snapshot = home.cache.read();
+    let mentions_time = request
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .any(|word| word == "time");
+    let time = match mentions_time.then(|| clock::read(&snapshot)) {
+        Some(clock::ClockReading::Time(time)) => Some(time),
+        _ => None,
+    };
+    let context = context::request_context(&snapshot, memory, request, time.as_deref());
+    format!("Request context:\n{context}\nRequest: {request}")
+}
+
+/// Recent turns as plain text. Facts about devices come from the request context instead.
 fn history_messages(history: &[Interaction]) -> Vec<ChatMessage> {
     let cutoff = now_millis() - HISTORY_WINDOW_MS;
     let recent: Vec<&Interaction> = history
@@ -234,26 +496,12 @@ fn history_messages(history: &[Interaction]) -> Vec<ChatMessage> {
     recent[recent.len().saturating_sub(HISTORY_TURNS)..]
         .iter()
         .flat_map(|interaction| {
-            let mut response = interaction.response.clone();
-            if !interaction.results.is_empty() {
-                response.push_str(&format!(" (Results: {})", interaction.results.join(" ")));
-            }
             [
                 ChatMessage::new(Role::User, interaction.request.clone()),
-                ChatMessage::new(Role::Assistant, response),
+                ChatMessage::new(Role::Assistant, interaction.response.clone()),
             ]
         })
         .collect()
-}
-
-fn confirmation_prompt(plan: &Plan) -> String {
-    let names: Vec<&str> = plan
-        .entities
-        .iter()
-        .map(|entity| entity.name.as_str())
-        .collect();
-    let verb = actions::verb(plan.action);
-    actions::capitalize(&format!("{verb} {}?", actions::list(&names)))
 }
 
 fn final_text(content: &str, results: &[String]) -> String {
@@ -276,379 +524,5 @@ fn strip_reasoning(content: &str) -> &str {
     }
 }
 
-/// Tracks the in-flight request and any action awaiting confirmation.
-#[derive(Default)]
-pub struct Session {
-    active: Mutex<Option<CancellationToken>>,
-    pending: Mutex<Option<PendingConfirmation>>,
-}
-
-struct PendingConfirmation {
-    interaction_id: i64,
-    request: ControlRequest,
-    created: Instant,
-}
-
-impl Session {
-    pub fn begin(&self) -> Result<CancellationToken, AssistantError> {
-        let mut active = lock(&self.active);
-        if active.is_some() {
-            return Err(AssistantError::Busy);
-        }
-        // A new request replaces any unanswered confirmation.
-        lock(&self.pending).take();
-        let token = CancellationToken::new();
-        *active = Some(token.clone());
-        Ok(token)
-    }
-
-    pub fn finish(&self) {
-        lock(&self.active).take();
-    }
-
-    pub fn cancel(&self) {
-        if let Some(token) = lock(&self.active).as_ref() {
-            token.cancel();
-        }
-    }
-
-    pub fn await_confirmation(&self, interaction_id: i64, request: ControlRequest) {
-        *lock(&self.pending) = Some(PendingConfirmation {
-            interaction_id,
-            request,
-            created: Instant::now(),
-        });
-    }
-
-    pub fn take_confirmation(&self, interaction_id: i64) -> Result<ControlRequest, AssistantError> {
-        match lock(&self.pending).take() {
-            Some(confirmation)
-                if confirmation.interaction_id == interaction_id
-                    && confirmation.created.elapsed() < CONFIRMATION_TIMEOUT =>
-            {
-                Ok(confirmation.request)
-            }
-            _ => Err(AssistantError::ConfirmationExpired),
-        }
-    }
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
 #[cfg(test)]
-mod tests {
-    use std::sync::Mutex as StdMutex;
-
-    use serde_json::json;
-
-    use super::*;
-    use crate::home_assistant::model::fixtures::{home, state};
-    use crate::home_assistant::{HaError, ServiceCall};
-    use crate::inference::ToolCall;
-
-    struct RecordingHomeAssistant<'a> {
-        cache: &'a HomeCache,
-        calls: StdMutex<Vec<ServiceCall>>,
-    }
-
-    impl ServiceCaller for RecordingHomeAssistant<'_> {
-        async fn call_service(&self, call: &ServiceCall) -> Result<(), HaError> {
-            self.calls.lock().unwrap().push(call.clone());
-            let new_state = if call.service == "turn_off" {
-                "off"
-            } else {
-                "on"
-            };
-            for id in &call.entity_ids {
-                self.cache
-                    .update(|home| home.apply_state(id, Some(state(id, new_state, json!({})))));
-            }
-            Ok(())
-        }
-    }
-
-    /// Replies with each scripted message in turn and records what it was sent.
-    struct ScriptedModel {
-        replies: StdMutex<Vec<ChatMessage>>,
-        received: StdMutex<Vec<Vec<ChatMessage>>>,
-    }
-
-    impl ScriptedModel {
-        fn new(replies: Vec<ChatMessage>) -> Self {
-            Self {
-                replies: StdMutex::new(replies.into_iter().rev().collect()),
-                received: StdMutex::default(),
-            }
-        }
-
-        fn last_message(&self) -> ChatMessage {
-            self.received
-                .lock()
-                .unwrap()
-                .last()
-                .unwrap()
-                .last()
-                .unwrap()
-                .clone()
-        }
-    }
-
-    impl Chat for ScriptedModel {
-        async fn chat(
-            &self,
-            messages: &[ChatMessage],
-            _: &Value,
-        ) -> Result<ChatMessage, InferenceError> {
-            self.received.lock().unwrap().push(messages.to_vec());
-            self.replies
-                .lock()
-                .unwrap()
-                .pop()
-                .ok_or(InferenceError::Request("no scripted reply".into()))
-        }
-    }
-
-    fn tool_call(name: &str, arguments: Value) -> ChatMessage {
-        ChatMessage {
-            tool_calls: vec![ToolCall {
-                id: "call-1".into(),
-                function: FunctionCall {
-                    name: name.into(),
-                    arguments,
-                },
-            }],
-            ..ChatMessage::new(Role::Assistant, "")
-        }
-    }
-
-    fn text(content: &str) -> ChatMessage {
-        ChatMessage::new(Role::Assistant, content)
-    }
-
-    async fn run(
-        model: &ScriptedModel,
-        cache: &HomeCache,
-        fake: &RecordingHomeAssistant<'_>,
-        request: &str,
-    ) -> Result<Reply, AssistantError> {
-        let home = Home {
-            cache,
-            caller: fake,
-            connected: true,
-        };
-        respond(model, home, &[], request, &CancellationToken::new()).await
-    }
-
-    fn recorder(cache: &HomeCache) -> RecordingHomeAssistant<'_> {
-        RecordingHomeAssistant {
-            cache,
-            calls: StdMutex::default(),
-        }
-    }
-
-    #[tokio::test]
-    async fn executes_validated_tool_calls_and_reports_results() {
-        let model = ScriptedModel::new(vec![
-            tool_call(
-                "control",
-                json!({"action": "turn_off", "target": {"floors": ["downstairs"], "domains": ["light"], "exclude_entities": ["light.hallway"]}}),
-            ),
-            text("Done, the lights downstairs are off except the hallway."),
-        ]);
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-
-        let reply = run(
-            &model,
-            &cache,
-            &fake,
-            "Turn off the lights downstairs except the hallway",
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(reply.results, ["Turned off kitchen and living room lamp."]);
-        assert_eq!(cache.read().entity("light.hallway").unwrap().state, "on");
-        let tool_message = model.last_message();
-        assert_eq!(tool_message.role, Role::Tool);
-        assert_eq!(tool_message.tool_call_id.as_deref(), Some("call-1"));
-    }
-
-    #[tokio::test]
-    async fn sensitive_actions_wait_for_confirmation() {
-        let model = ScriptedModel::new(vec![tool_call(
-            "control",
-            json!({"action": "unlock", "target": {"entities": ["lock.front_door"]}}),
-        )]);
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-
-        let reply = run(&model, &cache, &fake, "Unlock the front door")
-            .await
-            .unwrap();
-
-        assert_eq!(reply.text, "Unlock front door?");
-        assert!(reply.confirmation.is_some());
-        assert!(fake.calls.lock().unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn invalid_tool_calls_are_returned_to_the_model() {
-        let model = ScriptedModel::new(vec![
-            tool_call(
-                "control",
-                json!({"action": "turn_off", "target": {"entities": ["light.made_up"]}}),
-            ),
-            text("I couldn't find that light. Which one did you mean?"),
-        ]);
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-
-        let reply = run(&model, &cache, &fake, "Turn off the made up light")
-            .await
-            .unwrap();
-
-        assert!(reply.results.is_empty());
-        assert!(fake.calls.lock().unwrap().is_empty());
-        assert!(
-            model
-                .last_message()
-                .content
-                .contains("unknown entity id: light.made_up")
-        );
-    }
-
-    #[tokio::test]
-    async fn inference_errors_are_returned() {
-        let model = ScriptedModel::new(vec![]);
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-        let result = run(&model, &cache, &fake, "hi").await;
-        assert!(matches!(result, Err(AssistantError::Inference(_))));
-    }
-
-    #[tokio::test]
-    async fn cancelled_requests_stop_before_the_model_answers() {
-        let model = ScriptedModel::new(vec![text("hello")]);
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-        let home = Home {
-            cache: &cache,
-            caller: &fake,
-            connected: true,
-        };
-        let result = respond(&model, home, &[], "hi", &cancel).await;
-        assert_eq!(result, Err(AssistantError::Cancelled));
-    }
-
-    #[tokio::test]
-    async fn confirmed_requests_are_validated_and_executed() {
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-        let request: ControlRequest = serde_json::from_value(
-            json!({"action": "turn_off", "target": {"entities": ["light.kitchen"]}}),
-        )
-        .unwrap();
-        let home = Home {
-            cache: &cache,
-            caller: &fake,
-            connected: true,
-        };
-        assert_eq!(confirm(home, &request).await.text, "Turned off kitchen.");
-    }
-
-    /// Runs the real model: `LUNA_TEST_MODEL=/path/Qwen3-8B-Q4_K_M.gguf cargo test -- --ignored`.
-    #[tokio::test]
-    #[ignore]
-    async fn real_model_excludes_the_named_light() {
-        let path = std::path::PathBuf::from(std::env::var("LUNA_TEST_MODEL").unwrap());
-        let runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
-            "binaries/llama-server-{}{}",
-            env!("LUNA_TARGET_TRIPLE"),
-            std::env::consts::EXE_SUFFIX
-        ));
-        let pid_file = std::env::temp_dir().join("luna-real-model.pid");
-        let engine = Engine::new(runtime, pid_file);
-        let qwen = crate::models::catalog::find("qwen3-8b").unwrap();
-        let spec = ModelSpec {
-            id: qwen.id.clone(),
-            path,
-            context_length: 4096,
-            chat: qwen.chat.clone(),
-        };
-        let cache = HomeCache::new(home());
-        let fake = recorder(&cache);
-        let model = EngineChat {
-            engine: &engine,
-            spec: &spec,
-        };
-        let home = Home {
-            cache: &cache,
-            caller: &fake,
-            connected: true,
-        };
-
-        let request = "Turn off everything downstairs except the hallway light.";
-        let reply = respond(&model, home, &[], request, &CancellationToken::new())
-            .await
-            .unwrap();
-        engine.unload().await;
-
-        println!("reply: {}\nresults: {:?}", reply.text, reply.results);
-        let called: Vec<String> = fake
-            .calls
-            .lock()
-            .unwrap()
-            .iter()
-            .flat_map(|call| call.entity_ids.clone())
-            .collect();
-        println!("called: {called:?}");
-        assert!(called.contains(&"light.kitchen".to_string()));
-        assert!(!called.contains(&"light.hallway".to_string()));
-        assert!(
-            !called
-                .iter()
-                .any(|id| id.starts_with("lock.") || id.starts_with("cover.garage"))
-        );
-        assert_eq!(cache.read().entity("light.hallway").unwrap().state, "on");
-    }
-
-    #[test]
-    fn session_rejects_parallel_requests_and_expires_confirmations() {
-        let session = Session::default();
-        let _token = session.begin().unwrap();
-        assert_eq!(session.begin().err(), Some(AssistantError::Busy));
-        session.finish();
-
-        let request: ControlRequest = serde_json::from_value(
-            json!({"action": "unlock", "target": {"entities": ["lock.front_door"]}}),
-        )
-        .unwrap();
-        session.await_confirmation(7, request.clone());
-        assert_eq!(
-            session.take_confirmation(8).err(),
-            Some(AssistantError::ConfirmationExpired)
-        );
-        session.await_confirmation(7, request.clone());
-        assert_eq!(session.take_confirmation(7), Ok(request));
-        assert!(session.take_confirmation(7).is_err());
-    }
-
-    #[test]
-    fn final_text_removes_reasoning_and_em_dashes() {
-        assert_eq!(
-            final_text("<think>hmm</think> It's 20° \u{2014} warm.", &[]),
-            "It's 20°, warm."
-        );
-        assert_eq!(
-            final_text("", &["Turned off kitchen.".into()]),
-            "Turned off kitchen."
-        );
-    }
-}
+mod tests;
