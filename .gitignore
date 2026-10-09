@@ -29,3 +29,6 @@ Thumbs.db
 .idea/
 .vscode/
 *.log
+
+# Built llama.cpp runtime (see scripts/build-llama-server.sh)
+src-tauri/binaries/
