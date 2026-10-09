@@ -119,6 +119,25 @@ jobs:
 
       - run: npm ci
 
+      - name: Restore llama.cpp runtime
+        id: runtime-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src-tauri/binaries
+          key: llama-server-${{ matrix.target }}-${{ hashFiles('scripts/build-llama-server.sh') }}
+
+      - name: Build llama.cpp runtime
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        env:
+          LLAMA_BUILD_DIR: ${{ runner.temp }}/llama.cpp
+        run: scripts/build-llama-server.sh "${{ matrix.target }}"
+
+      - name: Check llama.cpp runtime runs
+        run: |
+          extension=""
+          [ "${{ matrix.bundle }}" = "nsis" ] && extension=".exe"
+          "src-tauri/binaries/llama-server-${{ matrix.target }}$extension" --version
+
       - name: Lint Rust
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings

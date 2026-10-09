@@ -1,4 +1,5 @@
 //! Local inference through the bundled llama.cpp server. One model is loaded at a time.
+mod process;
 mod server;
 
 use std::path::PathBuf;
@@ -11,6 +12,7 @@ use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 
 use crate::models::ChatOptions;
+use process::PidFile;
 use server::Server;
 
 /// Unloading after inactivity keeps memory free while Luna sits idle.
@@ -168,16 +170,21 @@ pub struct Engine {
 
 struct Inner {
     runtime: PathBuf,
+    pid_file: PidFile,
     server: Mutex<Option<Server>>,
     status: watch::Sender<EngineStatus>,
     activity: AtomicU64,
 }
 
 impl Engine {
-    pub fn new(runtime: PathBuf) -> Self {
+    /// `pid_file` records the running server so one left behind by a crash is stopped here.
+    pub fn new(runtime: PathBuf, pid_file: PathBuf) -> Self {
+        let pid_file = PidFile::new(pid_file);
+        pid_file.stop_leftover();
         Self {
             inner: Arc::new(Inner {
                 runtime,
+                pid_file,
                 server: Mutex::new(None),
                 status: watch::Sender::new(EngineStatus::Idle),
                 activity: AtomicU64::new(0),
@@ -220,6 +227,7 @@ impl Engine {
         let mut server = self.inner.server.lock().await;
         if let Some(running) = server.take() {
             running.shutdown().await;
+            self.inner.pid_file.clear();
         }
         self.inner.status.send_replace(EngineStatus::Idle);
     }
@@ -248,12 +256,16 @@ impl Engine {
         }
         if let Some(previous) = server.take() {
             previous.shutdown().await;
+            self.inner.pid_file.clear();
         }
         self.inner.status.send_replace(EngineStatus::Loading {
             model: spec.id.clone(),
         });
         match Server::start(&self.inner.runtime, spec).await {
             Ok(running) => {
+                if let Some(pid) = running.pid() {
+                    self.inner.pid_file.record(pid);
+                }
                 *server = Some(running);
                 self.inner.status.send_replace(EngineStatus::Ready {
                     model: spec.id.clone(),
@@ -280,6 +292,7 @@ impl Engine {
                     && let Some(running) = server.take()
                 {
                     running.shutdown().await;
+                    engine.inner.pid_file.clear();
                     engine.inner.status.send_replace(EngineStatus::Idle);
                 }
             }
@@ -301,7 +314,7 @@ mod tests {
     use super::*;
     use crate::models::catalog;
 
-    fn runtime() -> PathBuf {
+    pub(super) fn runtime() -> PathBuf {
         let target = env!("LUNA_TARGET_TRIPLE");
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("binaries")
@@ -309,6 +322,11 @@ mod tests {
                 "llama-server-{target}{}",
                 std::env::consts::EXE_SUFFIX
             ))
+    }
+
+    fn engine(runtime: PathBuf, name: &str) -> Engine {
+        let pid_file = std::env::temp_dir().join(format!("luna-{name}-{}.pid", std::process::id()));
+        Engine::new(runtime, pid_file)
     }
 
     fn spec(path: PathBuf, context_length: u32) -> ModelSpec {
@@ -352,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_runtime_is_reported() {
-        let engine = Engine::new(PathBuf::from("/nonexistent/llama-server"));
+        let engine = engine(PathBuf::from("/nonexistent/llama-server"), "no-runtime");
         let result = engine
             .load(&spec(PathBuf::from("/nonexistent.gguf"), 4096))
             .await;
@@ -361,7 +379,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_model_files_are_reported() {
-        let engine = Engine::new(runtime());
+        let engine = engine(runtime(), "no-model");
         let result = engine
             .load(&spec(PathBuf::from("/nonexistent.gguf"), 4096))
             .await;
@@ -372,7 +390,7 @@ mod tests {
     async fn invalid_model_files_fail_to_load_without_switching_models() {
         let path = std::env::temp_dir().join(format!("luna-invalid-{}.gguf", std::process::id()));
         std::fs::write(&path, b"not a gguf file").unwrap();
-        let engine = Engine::new(runtime());
+        let engine = engine(runtime(), "invalid");
 
         let result = engine.load(&spec(path.clone(), 4096)).await;
 
@@ -392,7 +410,7 @@ mod tests {
     #[ignore]
     async fn switching_models_unloads_first_and_never_runs_two_servers() {
         let path = PathBuf::from(std::env::var("LUNA_TEST_MODEL").unwrap());
-        let engine = Engine::new(runtime());
+        let engine = engine(runtime(), "switching");
         let (small, large) = (spec(path.clone(), 2048), spec(path, 4096));
 
         let (first, second) = tokio::join!(engine.load(&small), engine.load(&large));

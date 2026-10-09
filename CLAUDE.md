@@ -67,7 +67,10 @@ Luna is a privacy-first, local voice assistant for Home Assistant. It is a backg
 - React is for presentation and interaction only. Do not move logic into React because it is easier.
 - Types shared with the frontend are defined in Rust and exported with `ts-rs` to `src/bindings`. Never hand-edit them.
 - Commands return `CommandError { message }` with a user-facing message. Log the technical error in Rust.
-- Model configuration is centralised in settings. Never hardcode model-specific behaviour elsewhere.
+- Inference runs only through the bundled llama.cpp server in `src-tauri/src/inference/`. Never add another inference backend without approval.
+- Model-specific behaviour lives only in the catalogue (`src-tauri/models.json`). Never hardcode it elsewhere.
+- Never bundle model weights. Never download a model without an explicit user action. Never switch models automatically.
+- Downloaded models must be verified against the catalogue SHA-256 before they count as installed.
 - No microservices, RAG, vector databases, agent frameworks, or fine-tuning without a demonstrated requirement.
 
 ## Strict fallback policy
@@ -104,6 +107,8 @@ Normal error handling is allowed: retrying a temporarily disconnected Home Assis
 - Never publish a release automatically. Releases are created as drafts.
 
 ## Checks
+
+Build the bundled runtime once first: `scripts/build-llama-server.sh`.
 
 ```sh
 npm run format:check && npm run lint && npm run typecheck && npm test

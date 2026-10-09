@@ -35,16 +35,11 @@ export function SettingsView() {
   const { models, error: modelsError } = useModels();
 
   useEffect(() => {
-    Promise.all([
-      api.getSettings(),
-      api.getLaunchAtLogin(),
-      api.hasHomeAssistantToken(),
-    ])
-      .then(([settings, launch, tokenSaved]) => {
+    Promise.all([api.getSettings(), api.getLaunchAtLogin()])
+      .then(([settings, launch]) => {
         setSaved(settings);
         setDraft(settings);
         setLaunchAtLogin(launch);
-        setHasToken(tokenSaved);
         if (!settings.homeAssistantUrl) {
           api
             .discoverHomeAssistant()
@@ -52,6 +47,10 @@ export function SettingsView() {
             .catch((err: unknown) => setError(errorMessage(err)));
         }
       })
+      .catch((err: unknown) => setError(errorMessage(err)));
+    api
+      .hasHomeAssistantToken()
+      .then(setHasToken)
       .catch((err: unknown) => setError(errorMessage(err)));
   }, []);
 

@@ -563,6 +563,62 @@ mod tests {
         assert_eq!(confirm(home, &request).await.text, "Turned off kitchen.");
     }
 
+    /// Runs the real model: `LUNA_TEST_MODEL=/path/Qwen3-8B-Q4_K_M.gguf cargo test -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn real_model_excludes_the_named_light() {
+        let path = std::path::PathBuf::from(std::env::var("LUNA_TEST_MODEL").unwrap());
+        let runtime = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "binaries/llama-server-{}{}",
+            env!("LUNA_TARGET_TRIPLE"),
+            std::env::consts::EXE_SUFFIX
+        ));
+        let pid_file = std::env::temp_dir().join("luna-real-model.pid");
+        let engine = Engine::new(runtime, pid_file);
+        let qwen = crate::models::catalog::find("qwen3-8b").unwrap();
+        let spec = ModelSpec {
+            id: qwen.id.clone(),
+            path,
+            context_length: 4096,
+            chat: qwen.chat.clone(),
+        };
+        let cache = HomeCache::new(home());
+        let fake = recorder(&cache);
+        let model = EngineChat {
+            engine: &engine,
+            spec: &spec,
+        };
+        let home = Home {
+            cache: &cache,
+            caller: &fake,
+            connected: true,
+        };
+
+        let request = "Turn off everything downstairs except the hallway light.";
+        let reply = respond(&model, home, &[], request, &CancellationToken::new())
+            .await
+            .unwrap();
+        engine.unload().await;
+
+        println!("reply: {}\nresults: {:?}", reply.text, reply.results);
+        let called: Vec<String> = fake
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .flat_map(|call| call.entity_ids.clone())
+            .collect();
+        println!("called: {called:?}");
+        assert!(called.contains(&"light.kitchen".to_string()));
+        assert!(!called.contains(&"light.hallway".to_string()));
+        assert!(
+            !called
+                .iter()
+                .any(|id| id.starts_with("lock.") || id.starts_with("cover.garage"))
+        );
+        assert_eq!(cache.read().entity("light.hallway").unwrap().state, "on");
+    }
+
     #[test]
     fn session_rejects_parallel_requests_and_expires_confirmations() {
         let session = Session::default();

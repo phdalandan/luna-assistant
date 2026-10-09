@@ -89,4 +89,21 @@ describe("SettingsView", () => {
       "Enter a Home Assistant address like http://homeassistant.local:8123.",
     );
   });
+
+  it("stays usable when the credential store is unavailable", async () => {
+    mockBackend({
+      has_home_assistant_token: () => {
+        throw {
+          message: "Luna couldn't access your saved access token. Try again.",
+        };
+      },
+    });
+    render(<SettingsView />);
+    expect(
+      await screen.findByDisplayValue("http://homeassistant.local:8123"),
+    ).toBeTruthy();
+    expect((await screen.findByRole("alert")).textContent).toBe(
+      "Luna couldn't access your saved access token. Try again.",
+    );
+  });
 });
