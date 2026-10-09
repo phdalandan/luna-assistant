@@ -18,11 +18,21 @@ pub struct DiscoveredInstance {
 }
 
 #[derive(Debug, thiserror::Error)]
-#[error("mDNS discovery failed: {0}")]
-pub struct DiscoveryError(#[from] mdns_sd::Error);
+pub enum DiscoveryError {
+    #[error("mDNS discovery failed: {0}")]
+    Mdns(#[from] mdns_sd::Error),
+    #[error("mDNS discovery task failed: {0}")]
+    Task(String),
+}
 
-/// Browses the local network for Home Assistant instances. Blocks for a few seconds.
-pub fn discover() -> Result<Vec<DiscoveredInstance>, DiscoveryError> {
+/// Browses the local network for Home Assistant instances for a few seconds.
+pub async fn discover() -> Result<Vec<DiscoveredInstance>, DiscoveryError> {
+    tauri::async_runtime::spawn_blocking(browse)
+        .await
+        .map_err(|error| DiscoveryError::Task(error.to_string()))?
+}
+
+fn browse() -> Result<Vec<DiscoveredInstance>, DiscoveryError> {
     let daemon = ServiceDaemon::new()?;
     let receiver = daemon.browse(SERVICE_TYPE)?;
     let deadline = Instant::now() + BROWSE_DURATION;
@@ -106,6 +116,9 @@ mod tests {
 
     #[test]
     fn ignores_records_without_any_address() {
-        assert_eq!(instance_from_record(Some("Home"), None, None, None, 8123), None);
+        assert_eq!(
+            instance_from_record(Some("Home"), None, None, None, 8123),
+            None
+        );
     }
 }

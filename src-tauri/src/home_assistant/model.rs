@@ -230,7 +230,11 @@ pub mod fixtures {
         }
     }
 
-    fn entity_entry(entity_id: &str, area_id: Option<&str>, device_id: Option<&str>) -> EntityEntry {
+    fn entity_entry(
+        entity_id: &str,
+        area_id: Option<&str>,
+        device_id: Option<&str>,
+    ) -> EntityEntry {
         EntityEntry {
             entity_id: entity_id.into(),
             name: None,
@@ -261,7 +265,10 @@ pub mod fixtures {
         config.entity_category = Some("config".into());
 
         let registries = Registries {
-            floors: vec![floor("downstairs", "Downstairs"), floor("upstairs", "Upstairs")],
+            floors: vec![
+                floor("downstairs", "Downstairs"),
+                floor("upstairs", "Upstairs"),
+            ],
             areas: vec![
                 area("living_room", "Living Room", "downstairs"),
                 area("kitchen", "Kitchen", "downstairs"),
@@ -291,17 +298,49 @@ pub mod fixtures {
             ],
         };
         let states = vec![
-            state("light.living_room_lamp", "on", json!({"supported_color_modes": ["brightness"], "brightness": 255})),
-            state("light.kitchen", "on", json!({"supported_color_modes": ["onoff"]})),
-            state("light.hallway", "on", json!({"supported_color_modes": ["brightness"], "brightness": 128})),
-            state("light.bedroom", "off", json!({"supported_color_modes": ["brightness"]})),
+            state(
+                "light.living_room_lamp",
+                "on",
+                json!({"supported_color_modes": ["brightness"], "brightness": 255}),
+            ),
+            state(
+                "light.kitchen",
+                "on",
+                json!({"supported_color_modes": ["onoff"]}),
+            ),
+            state(
+                "light.hallway",
+                "on",
+                json!({"supported_color_modes": ["brightness"], "brightness": 128}),
+            ),
+            state(
+                "light.bedroom",
+                "off",
+                json!({"supported_color_modes": ["brightness"]}),
+            ),
             state("switch.tv_plug", "on", json!({})),
             state("media_player.living_room_tv", "playing", json!({})),
-            state("climate.thermostat", "heat", json!({"supported_features": 1, "temperature": 20, "current_temperature": 19.5, "min_temp": 7, "max_temp": 35})),
+            state(
+                "climate.thermostat",
+                "heat",
+                json!({"supported_features": 1, "temperature": 20, "current_temperature": 19.5, "min_temp": 7, "max_temp": 35}),
+            ),
             state("lock.front_door", "locked", json!({})),
-            state("cover.garage_door", "closed", json!({"device_class": "garage", "supported_features": 3})),
-            state("cover.living_room_blinds", "open", json!({"device_class": "blind", "supported_features": 3})),
-            state("sensor.bedroom_temperature", "18.2", json!({"device_class": "temperature", "unit_of_measurement": "°C"})),
+            state(
+                "cover.garage_door",
+                "closed",
+                json!({"device_class": "garage", "supported_features": 3}),
+            ),
+            state(
+                "cover.living_room_blinds",
+                "open",
+                json!({"device_class": "blind", "supported_features": 3}),
+            ),
+            state(
+                "sensor.bedroom_temperature",
+                "18.2",
+                json!({"device_class": "temperature", "unit_of_measurement": "°C"}),
+            ),
             state("scene.movie_night", "2026-01-01T00:00:00+00:00", json!({})),
             state("switch.hidden_relay", "on", json!({})),
             state("switch.kitchen_child_lock", "off", json!({})),
@@ -335,7 +374,10 @@ mod tests {
     #[test]
     fn state_changes_keep_registry_metadata() {
         let mut home = home();
-        home.apply_state("light.kitchen", Some(state("light.kitchen", "off", json!({}))));
+        home.apply_state(
+            "light.kitchen",
+            Some(state("light.kitchen", "off", json!({}))),
+        );
         let kitchen = home.entity("light.kitchen").unwrap();
         assert_eq!(kitchen.state, "off");
         assert_eq!(kitchen.area_id.as_deref(), Some("kitchen"));
@@ -351,7 +393,10 @@ mod tests {
     #[test]
     fn entities_without_registry_entries_have_no_area() {
         let mut home = home();
-        home.apply_state("light.yaml_light", Some(state("light.yaml_light", "on", json!({}))));
+        home.apply_state(
+            "light.yaml_light",
+            Some(state("light.yaml_light", "on", json!({}))),
+        );
         assert_eq!(home.entity("light.yaml_light").unwrap().area_id, None);
     }
 }

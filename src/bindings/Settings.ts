@@ -4,4 +4,8 @@ export type Settings = {
 /**
  * Empty until the user connects Home Assistant.
  */
-homeAssistantUrl: string, ollamaUrl: string, model: string, contextLength: number, };
+homeAssistantUrl: string, 
+/**
+ * Changed only by selecting an installed model, never by saving the form.
+ */
+activeModel: string | null, contextLength: number, };

@@ -83,8 +83,7 @@ pub struct ServiceCall {
 }
 
 pub trait ServiceCaller {
-    fn call_service(&self, call: &ServiceCall)
-    -> impl Future<Output = Result<(), HaError>> + Send;
+    fn call_service(&self, call: &ServiceCall) -> impl Future<Output = Result<(), HaError>> + Send;
 }
 
 pub struct HomeAssistant {
@@ -291,12 +290,13 @@ async fn fetch<T: serde::de::DeserializeOwned>(
     command: &str,
 ) -> Result<Vec<T>, HaError> {
     let result = connection.request(json!({"type": command})).await?;
-    serde_json::from_value(result)
-        .map_err(|error| HaError::Protocol(format!("{command}: {error}")))
+    serde_json::from_value(result).map_err(|error| HaError::Protocol(format!("{command}: {error}")))
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]

@@ -38,15 +38,29 @@ pub fn select<'a>(home: &'a Home, target: &Target) -> Result<Selection<'a>, Reso
     let mut selected: BTreeMap<&str, Selected<'a>> = BTreeMap::new();
     if has_location || !target.domains.is_empty() {
         for entity in home.entities.values() {
-            if !entity.internal && in_location(home, target, entity) && matches_filters(target, entity)
+            if !entity.internal
+                && in_location(home, target, entity)
+                && matches_filters(target, entity)
             {
-                selected.insert(&entity.id, Selected { entity, explicit: false });
+                selected.insert(
+                    &entity.id,
+                    Selected {
+                        entity,
+                        explicit: false,
+                    },
+                );
             }
         }
     }
     for id in &target.entities {
         if let Some(entity) = home.entity(id) {
-            selected.insert(&entity.id, Selected { entity, explicit: true });
+            selected.insert(
+                &entity.id,
+                Selected {
+                    entity,
+                    explicit: true,
+                },
+            );
         }
     }
 
@@ -86,8 +100,11 @@ fn in_location(home: &Home, target: &Target, entity: &Entity) -> bool {
 }
 
 fn matches_filters(target: &Target, entity: &Entity) -> bool {
-    let domain_ok =
-        target.domains.is_empty() || target.domains.iter().any(|domain| domain == entity.domain());
+    let domain_ok = target.domains.is_empty()
+        || target
+            .domains
+            .iter()
+            .any(|domain| domain == entity.domain());
     let class_ok = target.device_classes.is_empty()
         || entity
             .device_class()
@@ -131,7 +148,10 @@ mod tests {
                 ..Target::default()
             },
         );
-        assert_eq!(selected, ["light.hallway", "light.kitchen", "light.living_room_lamp"]);
+        assert_eq!(
+            selected,
+            ["light.hallway", "light.kitchen", "light.living_room_lamp"]
+        );
     }
 
     #[test]

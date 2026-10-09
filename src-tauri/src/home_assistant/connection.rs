@@ -142,7 +142,11 @@ impl Connection {
         let (tx, rx) = oneshot::channel();
         lock(&self.pending).insert(id, tx);
 
-        if self.writer.send(Message::text(payload.to_string())).is_err() {
+        if self
+            .writer
+            .send(Message::text(payload.to_string()))
+            .is_err()
+        {
             lock(&self.pending).remove(&id);
             return Err(HaError::Disconnected);
         }
@@ -195,16 +199,15 @@ fn resolve(pending: &Pending, message: &Value) {
     else {
         return;
     };
-    let result =
-        if message_type(message) == "pong" || message["success"].as_bool() == Some(true) {
-            Ok(message.get("result").cloned().unwrap_or(Value::Null))
-        } else {
-            let error = &message["error"];
-            Err(HaError::Request {
-                code: error["code"].as_str().unwrap_or("unknown").to_owned(),
-                message: error["message"].as_str().unwrap_or_default().to_owned(),
-            })
-        };
+    let result = if message_type(message) == "pong" || message["success"].as_bool() == Some(true) {
+        Ok(message.get("result").cloned().unwrap_or(Value::Null))
+    } else {
+        let error = &message["error"];
+        Err(HaError::Request {
+            code: error["code"].as_str().unwrap_or("unknown").to_owned(),
+            message: error["message"].as_str().unwrap_or_default().to_owned(),
+        })
+    };
     let _ = sender.send(result);
 }
 
@@ -246,7 +249,9 @@ fn check_version(version: Option<&str>) -> Result<(), HaError> {
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(test)]
@@ -352,10 +357,17 @@ mod tests {
         let url = server(|mut socket| async move {
             send(&mut socket, json!({"type": "auth_required"})).await;
             receive(&mut socket).await;
-            send(&mut socket, json!({"type": "auth_invalid", "message": "bad"})).await;
+            send(
+                &mut socket,
+                json!({"type": "auth_invalid", "message": "bad"}),
+            )
+            .await;
         })
         .await;
-        assert_eq!(connect(&url, &token()).await.err(), Some(HaError::AuthInvalid));
+        assert_eq!(
+            connect(&url, &token()).await.err(),
+            Some(HaError::AuthInvalid)
+        );
     }
 
     #[tokio::test]

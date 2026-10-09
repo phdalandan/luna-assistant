@@ -365,8 +365,16 @@ mod tests {
         let fake = fake(&cache, Some(("off", json!({}))));
         let report = execute(&plan, &fake, &cache).await;
 
-        assert!(report.outcomes.iter().all(|outcome| outcome.outcome == Outcome::Done));
-        assert_eq!(report.summary(), ["Turned off kitchen, living room lamp, and tv plug."]);
+        assert!(
+            report
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.outcome == Outcome::Done)
+        );
+        assert_eq!(
+            report.summary(),
+            ["Turned off kitchen, living room lamp, and tv plug."]
+        );
         assert_eq!(cache.read().entity("light.hallway").unwrap().state, "on");
         let called: Vec<String> = fake
             .calls
@@ -406,7 +414,10 @@ mod tests {
 
         assert_eq!(
             report.summary(),
-            ["Turned off kitchen and living room lamp.", "Couldn't turn off tv plug."]
+            [
+                "Turned off kitchen and living room lamp.",
+                "Couldn't turn off tv plug."
+            ]
         );
         assert!(report.for_model().contains("tv plug: failed"));
     }
@@ -414,7 +425,11 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn moving_covers_are_in_progress() {
         let cache = HomeCache::new(home());
-        let plan = plan(&cache.read(), &single(Action::Open, "cover.garage_door", None)).unwrap();
+        let plan = plan(
+            &cache.read(),
+            &single(Action::Open, "cover.garage_door", None),
+        )
+        .unwrap();
         let opening = fake(&cache, Some(("opening", json!({"device_class": "garage"}))));
         let report = execute(&plan, &opening, &cache).await;
         assert_eq!(report.summary(), ["Garage door is opening."]);

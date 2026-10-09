@@ -40,7 +40,13 @@ pub fn insert(
     conn.execute(
         "INSERT INTO interactions (created_at, request, response, results, awaiting_confirmation)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![created_at, request, response, encode(results), awaiting_confirmation],
+        params![
+            created_at,
+            request,
+            response,
+            encode(results),
+            awaiting_confirmation
+        ],
     )?;
     let id = conn.last_insert_rowid();
     conn.execute(
@@ -113,7 +119,14 @@ mod tests {
     fn stores_and_lists_interactions_in_order() {
         let conn = db::open_in_memory().unwrap();
         insert(&conn, "first", "one", &[], false).unwrap();
-        insert(&conn, "second", "two", &["Turned off kitchen.".into()], false).unwrap();
+        insert(
+            &conn,
+            "second",
+            "two",
+            &["Turned off kitchen.".into()],
+            false,
+        )
+        .unwrap();
         let recent = recent(&conn, 10).unwrap();
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].request, "first");

@@ -1,19 +1,47 @@
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
+use serde::Serialize;
 use tauri::{AppHandle, State};
 use tauri_plugin_autostart::ManagerExt;
 
+use crate::assistant::{self, EngineChat, Home, Session};
+use crate::credentials::{self, AccessToken};
 use crate::error::{AppError, CommandError};
+use crate::history::{self, Interaction};
+use crate::home_assistant::discovery::{self, DiscoveredInstance};
+use crate::home_assistant::{ConnectionStatus, HomeAssistant};
+use crate::inference::{Engine, EngineStatus, ModelSpec};
+use crate::models::{ModelInfo, ModelManager};
 use crate::settings::{self, Settings};
+
+const VISIBLE_HISTORY: usize = 30;
 
 pub struct AppState {
     db: Mutex<Connection>,
+    pub home_assistant: HomeAssistant,
+    pub engine: Engine,
+    pub models: Arc<ModelManager>,
+    session: Session,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "camelCase")]
+pub struct Status {
+    pub home_assistant: ConnectionStatus,
+    pub engine: EngineStatus,
 }
 
 impl AppState {
-    pub fn new(db: Connection) -> Self {
-        Self { db: Mutex::new(db) }
+    pub fn new(db: Connection, engine: Engine, models: Arc<ModelManager>) -> Self {
+        Self {
+            db: Mutex::new(db),
+            home_assistant: HomeAssistant::default(),
+            engine,
+            models,
+            session: Session::default(),
+        }
     }
 
     fn db(&self) -> MutexGuard<'_, Connection> {
@@ -22,21 +50,209 @@ impl AppState {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
+
+    pub fn settings(&self) -> Result<Settings, AppError> {
+        settings::load(&self.db())
+    }
+
+    pub fn status(&self) -> Status {
+        Status {
+            home_assistant: self.home_assistant.status(),
+            engine: self.engine.status(),
+        }
+    }
+
+    /// Connects to Home Assistant with the saved address and token.
+    pub fn connect_home_assistant(&self, url: &str) {
+        if url.is_empty() {
+            self.home_assistant.configure(None);
+            return;
+        }
+        match credentials::load_home_assistant_token() {
+            Ok(Some(token)) => self.home_assistant.configure(Some((url.to_owned(), token))),
+            Ok(None) => self.home_assistant.configure(None),
+            Err(error) => {
+                log::error!("{error}");
+                self.home_assistant.fail(ConnectionStatus::TokenUnavailable);
+            }
+        }
+    }
+
+    fn model_spec(&self, settings: &Settings) -> Result<ModelSpec, AppError> {
+        let id = settings
+            .active_model
+            .as_deref()
+            .ok_or(AppError::NoActiveModel)?;
+        let model = self.models.installed(id)?;
+        Ok(ModelSpec {
+            id: model.id.clone(),
+            path: self.models.store().model_path(model),
+            context_length: settings.context_length,
+            chat: model.chat.clone(),
+        })
+    }
+
+    fn home(&self) -> Home<'_, HomeAssistant> {
+        Home {
+            cache: self.home_assistant.cache(),
+            caller: &self.home_assistant,
+            connected: self.home_assistant.status() == ConnectionStatus::Connected,
+        }
+    }
 }
 
 #[tauri::command]
 pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, CommandError> {
-    Ok(settings::load(&state.db())?)
+    Ok(state.settings()?)
 }
 
+/// Saves the form. A new access token is stored only in the OS credential store.
 #[tauri::command]
 pub fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
+    token: Option<String>,
 ) -> Result<Settings, CommandError> {
-    let settings = settings.validated().map_err(AppError::from)?;
+    let previous = state.settings()?;
+    let settings = Settings {
+        active_model: previous.active_model.clone(),
+        ..settings.validated()?
+    };
+    let token = token.and_then(AccessToken::new);
+    if let Some(token) = &token {
+        credentials::save_home_assistant_token(token)?;
+    }
+    if settings.home_assistant_url.is_empty() {
+        credentials::delete_home_assistant_token()?;
+    }
     settings::save(&state.db(), &settings)?;
+
+    if token.is_some() || settings.home_assistant_url != previous.home_assistant_url {
+        state.connect_home_assistant(&settings.home_assistant_url);
+    }
+    if settings.context_length != previous.context_length {
+        // The next request reloads the model with the new context length.
+        let engine = state.engine.clone();
+        tauri::async_runtime::spawn(async move { engine.unload().await });
+    }
     Ok(settings)
+}
+
+#[tauri::command]
+pub fn has_home_assistant_token() -> Result<bool, CommandError> {
+    Ok(credentials::load_home_assistant_token()?.is_some())
+}
+
+#[tauri::command]
+pub async fn discover_home_assistant() -> Result<Vec<DiscoveredInstance>, CommandError> {
+    Ok(discovery::discover().await?)
+}
+
+#[tauri::command]
+pub fn get_status(state: State<'_, AppState>) -> Status {
+    state.status()
+}
+
+#[tauri::command]
+pub fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfo>, CommandError> {
+    let settings = state.settings()?;
+    Ok(state
+        .models
+        .list(settings.active_model.as_deref(), settings.context_length))
+}
+
+#[tauri::command]
+pub fn download_model(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    Ok(state.models.start_download(&id)?)
+}
+
+#[tauri::command]
+pub fn pause_download(state: State<'_, AppState>, id: String) {
+    state.models.pause_download(&id);
+}
+
+#[tauri::command]
+pub fn cancel_download(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    Ok(state.models.cancel_download(&id)?)
+}
+
+#[tauri::command]
+pub fn delete_model(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    let settings = state.settings()?;
+    let in_use =
+        settings.active_model.as_deref() == Some(id.as_str()) || state.engine.is_loaded(&id);
+    Ok(state.models.delete(&id, in_use)?)
+}
+
+/// Makes an installed model active and loads it, replacing any loaded model.
+#[tauri::command]
+pub async fn select_model(state: State<'_, AppState>, id: String) -> Result<(), CommandError> {
+    state.models.installed(&id)?;
+    let settings = Settings {
+        active_model: Some(id),
+        ..state.settings()?
+    };
+    settings::save(&state.db(), &settings)?;
+    state.models.notify_changed();
+    state.session.cancel();
+    let spec = state.model_spec(&settings)?;
+    Ok(state.engine.load(&spec).await?)
+}
+
+#[tauri::command]
+pub async fn ask(state: State<'_, AppState>, text: String) -> Result<Interaction, CommandError> {
+    let text = text.trim().to_owned();
+    let settings = state.settings()?;
+    let spec = state.model_spec(&settings)?;
+    let history = history::recent(&state.db(), VISIBLE_HISTORY)?;
+    let cancel = state.session.begin()?;
+    let _finished = SessionGuard(&state.session);
+
+    let model = EngineChat {
+        engine: &state.engine,
+        spec: &spec,
+    };
+    let reply = assistant::respond(&model, state.home(), &history, &text, &cancel).await?;
+    let interaction = history::insert(
+        &state.db(),
+        &text,
+        &reply.text,
+        &reply.results,
+        reply.confirmation.is_some(),
+    )?;
+    if let Some(request) = reply.confirmation {
+        state.session.await_confirmation(interaction.id, request);
+    }
+    Ok(interaction)
+}
+
+#[tauri::command]
+pub fn cancel_request(state: State<'_, AppState>) {
+    state.session.cancel();
+}
+
+#[tauri::command]
+pub async fn confirm_action(
+    state: State<'_, AppState>,
+    id: i64,
+    confirmed: bool,
+) -> Result<Interaction, CommandError> {
+    let text = match (state.session.take_confirmation(id), confirmed) {
+        (Ok(request), true) => assistant::confirm(state.home(), &request).await.text,
+        (Ok(_), false) => "Okay, nothing changed.".to_owned(),
+        (Err(_), _) => "That request expired, so nothing changed.".to_owned(),
+    };
+    Ok(history::resolve(&state.db(), id, &text, &[])?)
+}
+
+#[tauri::command]
+pub fn list_interactions(state: State<'_, AppState>) -> Result<Vec<Interaction>, CommandError> {
+    Ok(history::recent(&state.db(), VISIBLE_HISTORY)?)
+}
+
+#[tauri::command]
+pub fn clear_history(state: State<'_, AppState>) -> Result<(), CommandError> {
+    Ok(history::clear(&state.db())?)
 }
 
 #[tauri::command]
@@ -59,4 +275,13 @@ pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<bool, Comman
     result
         .and_then(|()| launcher.is_enabled())
         .map_err(|error| AppError::LaunchAtLogin(error.to_string()).into())
+}
+
+/// Marks the request finished even if the command future is dropped.
+struct SessionGuard<'a>(&'a Session);
+
+impl Drop for SessionGuard<'_> {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
 }

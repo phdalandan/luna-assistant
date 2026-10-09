@@ -15,13 +15,6 @@ const MIGRATIONS: &[&str] = &[
         results TEXT NOT NULL,
         awaiting_confirmation INTEGER NOT NULL
     ) STRICT;",
-    "CREATE TABLE installed_models (
-        id TEXT PRIMARY KEY,
-        file_name TEXT NOT NULL,
-        sha256 TEXT NOT NULL,
-        size INTEGER NOT NULL,
-        installed_at INTEGER NOT NULL
-    ) STRICT;",
 ];
 const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
 
@@ -84,7 +77,7 @@ mod tests {
     fn settings_persist_across_reopen() {
         let db = TempDb::new("reopen");
         let saved = Settings {
-            model: "gemma3:12b".into(),
+            active_model: Some("gemma-3-12b".into()),
             ..Settings::default()
         };
         settings::save(&open(&db.0).unwrap(), &saved).unwrap();

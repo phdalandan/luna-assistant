@@ -9,8 +9,28 @@ const MAX_CONTEXT_ENTITIES: usize = 25;
 const MAX_STATE_RESULTS: usize = 60;
 
 const STOP_WORDS: &[&str] = &[
-    "the", "and", "all", "any", "are", "every", "everything", "except", "for", "from", "have",
-    "into", "its", "off", "please", "room", "still", "that", "this", "turn", "what", "with",
+    "the",
+    "and",
+    "all",
+    "any",
+    "are",
+    "every",
+    "everything",
+    "except",
+    "for",
+    "from",
+    "have",
+    "into",
+    "its",
+    "off",
+    "please",
+    "room",
+    "still",
+    "that",
+    "this",
+    "turn",
+    "what",
+    "with",
 ];
 
 /// Words that point at a device type rather than a name.
@@ -20,23 +40,46 @@ const DOMAIN_WORDS: &[(&str, &[&str])] = &[
     ("fan", &["fan"]),
     (
         "cover",
-        &["blind", "curtain", "shade", "shutter", "garage", "gate", "cover", "open", "close"],
+        &[
+            "blind", "curtain", "shade", "shutter", "garage", "gate", "cover", "open", "close",
+        ],
     ),
     (
         "climate",
-        &["thermostat", "heating", "heat", "cool", "cooling", "warm", "cold", "temperature"],
+        &[
+            "thermostat",
+            "heating",
+            "heat",
+            "cool",
+            "cooling",
+            "warm",
+            "cold",
+            "temperature",
+        ],
     ),
     ("sensor", &["temperature", "humidity", "power", "energy"]),
     ("lock", &["lock", "unlock", "door"]),
-    ("media_player", &["tv", "television", "speaker", "music", "media"]),
-    ("scene", &["scene", "mode", "bed", "movie", "night", "morning"]),
+    (
+        "media_player",
+        &["tv", "television", "speaker", "music", "media"],
+    ),
+    (
+        "scene",
+        &["scene", "mode", "bed", "movie", "night", "morning"],
+    ),
 ];
 
 /// Floors, areas, and the entities most likely to matter for `request`.
 pub fn summarize(home: &Home, request: &str) -> String {
     let mut text = String::from("Floors:\n");
     for floor in &home.floors {
-        let _ = writeln!(text, "- {} [{}]{}", floor.name, floor.id, aliases(&floor.aliases));
+        let _ = writeln!(
+            text,
+            "- {} [{}]{}",
+            floor.name,
+            floor.id,
+            aliases(&floor.aliases)
+        );
     }
     text.push_str("Areas:\n");
     for area in &home.areas {
@@ -46,7 +89,13 @@ pub fn summarize(home: &Home, request: &str) -> String {
             .and_then(|id| home.floor(id))
             .map(|floor| format!(", floor {}", floor.id))
             .unwrap_or_default();
-        let _ = writeln!(text, "- {} [{}]{floor}{}", area.name, area.id, aliases(&area.aliases));
+        let _ = writeln!(
+            text,
+            "- {} [{}]{floor}{}",
+            area.name,
+            area.id,
+            aliases(&area.aliases)
+        );
     }
     let relevant = relevant_entities(home, request);
     if !relevant.is_empty() {
@@ -92,14 +141,25 @@ fn describe(home: &Home, entity: &Entity) -> String {
         details.push(format!("class {class}"));
     }
     if let Some(brightness) = entity.attributes.get("brightness").and_then(Value::as_f64) {
-        details.push(format!("brightness {}%", (brightness * 100.0 / 255.0).round()));
+        details.push(format!(
+            "brightness {}%",
+            (brightness * 100.0 / 255.0).round()
+        ));
     }
-    for (key, label) in [("current_temperature", "current"), ("temperature", "target")] {
+    for (key, label) in [
+        ("current_temperature", "current"),
+        ("temperature", "target"),
+    ] {
         if let Some(value) = entity.attributes.get(key).and_then(Value::as_f64) {
             details.push(format!("{label} {value}°"));
         }
     }
-    format!("- {} [{}]{area}: {}\n", entity.name, entity.id, details.join(", "))
+    format!(
+        "- {} [{}]{area}: {}\n",
+        entity.name,
+        entity.id,
+        details.join(", ")
+    )
 }
 
 fn aliases(aliases: &[String]) -> String {
@@ -190,7 +250,10 @@ mod tests {
 
     #[test]
     fn matches_entities_by_name() {
-        let found = ids(&home(), "Turn off everything downstairs except the hallway light");
+        let found = ids(
+            &home(),
+            "Turn off everything downstairs except the hallway light",
+        );
         assert_eq!(found.first().map(String::as_str), Some("light.hallway"));
     }
 

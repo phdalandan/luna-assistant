@@ -236,7 +236,11 @@ fn checked_value(action: Action, value: Option<f64>) -> Result<Option<f64>, Vali
     Ok(Some(value))
 }
 
-fn check_entity(entity: &Entity, action: Action, value: Option<f64>) -> Result<(), ValidationError> {
+fn check_entity(
+    entity: &Entity,
+    action: Action,
+    value: Option<f64>,
+) -> Result<(), ValidationError> {
     if !entity.is_available() {
         return Err(ValidationError::Unavailable {
             name: entity.name.clone(),
@@ -350,7 +354,10 @@ mod tests {
             .iter()
             .map(|call| (call.domain, call.service, call.entity_ids.len()))
             .collect();
-        assert_eq!(services, [("light", "turn_off", 2), ("switch", "turn_off", 1)]);
+        assert_eq!(
+            services,
+            [("light", "turn_off", 2), ("switch", "turn_off", 1)]
+        );
     }
 
     #[test]
@@ -374,11 +381,20 @@ mod tests {
     #[test]
     fn sensitive_actions_require_confirmation() {
         let home = home();
-        let unlock = plan(&home, &request(Action::Unlock, entities(&["lock.front_door"]), None));
+        let unlock = plan(
+            &home,
+            &request(Action::Unlock, entities(&["lock.front_door"]), None),
+        );
         assert!(unlock.unwrap().requires_confirmation);
-        let garage = plan(&home, &request(Action::Open, entities(&["cover.garage_door"]), None));
+        let garage = plan(
+            &home,
+            &request(Action::Open, entities(&["cover.garage_door"]), None),
+        );
         assert!(garage.unwrap().requires_confirmation);
-        let lock = plan(&home, &request(Action::Lock, entities(&["lock.front_door"]), None));
+        let lock = plan(
+            &home,
+            &request(Action::Lock, entities(&["lock.front_door"]), None),
+        );
         assert!(!lock.unwrap().requires_confirmation);
     }
 
@@ -386,7 +402,11 @@ mod tests {
     fn unsupported_action_on_named_entity_is_rejected() {
         let result = plan(
             &home(),
-            &request(Action::TurnOn, entities(&["sensor.bedroom_temperature"]), None),
+            &request(
+                Action::TurnOn,
+                entities(&["sensor.bedroom_temperature"]),
+                None,
+            ),
         );
         assert!(matches!(result, Err(ValidationError::Unsupported { .. })));
     }
@@ -395,7 +415,11 @@ mod tests {
     fn missing_feature_is_rejected_for_named_entities_and_skipped_otherwise() {
         let named = plan(
             &home(),
-            &request(Action::SetBrightness, entities(&["light.kitchen"]), Some(50.0)),
+            &request(
+                Action::SetBrightness,
+                entities(&["light.kitchen"]),
+                Some(50.0),
+            ),
         );
         assert!(matches!(named, Err(ValidationError::Unsupported { .. })));
 
@@ -413,7 +437,11 @@ mod tests {
     fn media_player_without_power_features_is_rejected() {
         let result = plan(
             &home(),
-            &request(Action::TurnOff, entities(&["media_player.living_room_tv"]), None),
+            &request(
+                Action::TurnOff,
+                entities(&["media_player.living_room_tv"]),
+                None,
+            ),
         );
         assert!(matches!(result, Err(ValidationError::Unsupported { .. })));
     }
@@ -426,14 +454,30 @@ mod tests {
 
         let missing = plan(&home, &request(Action::SetBrightness, hallway(), None));
         assert!(matches!(missing, Err(ValidationError::MissingValue { .. })));
-        let too_bright = plan(&home, &request(Action::SetBrightness, hallway(), Some(150.0)));
-        assert!(matches!(too_bright, Err(ValidationError::OutOfRange { .. })));
+        let too_bright = plan(
+            &home,
+            &request(Action::SetBrightness, hallway(), Some(150.0)),
+        );
+        assert!(matches!(
+            too_bright,
+            Err(ValidationError::OutOfRange { .. })
+        ));
         let unexpected = plan(&home, &request(Action::TurnOn, hallway(), Some(1.0)));
-        assert!(matches!(unexpected, Err(ValidationError::UnexpectedValue { .. })));
-        let too_hot = plan(&home, &request(Action::SetTemperature, thermostat(), Some(40.0)));
+        assert!(matches!(
+            unexpected,
+            Err(ValidationError::UnexpectedValue { .. })
+        ));
+        let too_hot = plan(
+            &home,
+            &request(Action::SetTemperature, thermostat(), Some(40.0)),
+        );
         assert!(matches!(too_hot, Err(ValidationError::OutOfRange { .. })));
 
-        let ok = plan(&home, &request(Action::SetTemperature, thermostat(), Some(21.5))).unwrap();
+        let ok = plan(
+            &home,
+            &request(Action::SetTemperature, thermostat(), Some(21.5)),
+        )
+        .unwrap();
         assert_eq!(ok.calls[0].service, "set_temperature");
         assert_eq!(ok.calls[0].data["temperature"], json!(21.5));
     }
@@ -445,7 +489,10 @@ mod tests {
             "light.bedroom",
             Some(state("light.bedroom", "unavailable", json!({}))),
         );
-        let named = plan(&home, &request(Action::TurnOn, entities(&["light.bedroom"]), None));
+        let named = plan(
+            &home,
+            &request(Action::TurnOn, entities(&["light.bedroom"]), None),
+        );
         assert!(matches!(named, Err(ValidationError::Unavailable { .. })));
 
         let broad = plan(&home, &request(Action::TurnOn, floor("upstairs"), None));
@@ -461,6 +508,9 @@ mod tests {
             &request(Action::Activate, entities(&["scene.movie_night"]), None),
         )
         .unwrap();
-        assert_eq!((plan.calls[0].domain, plan.calls[0].service), ("scene", "turn_on"));
+        assert_eq!(
+            (plan.calls[0].domain, plan.calls[0].service),
+            ("scene", "turn_on")
+        );
     }
 }

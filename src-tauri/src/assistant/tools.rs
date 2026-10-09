@@ -71,9 +71,7 @@ pub fn definitions() -> Value {
 }
 
 fn target_schema() -> Value {
-    let ids = |description: &str| {
-        json!({"type": "array", "items": {"type": "string"}, "description": description})
-    };
+    let ids = |description: &str| json!({"type": "array", "items": {"type": "string"}, "description": description});
     json!({
         "type": "object",
         "description": "Which devices. Combine fields as needed. Exclusions are removed before anything runs.",
@@ -106,7 +104,9 @@ pub fn parse(call: &FunctionCall) -> Result<ToolRequest, String> {
         CONTROL => serde_json::from_value(arguments)
             .map(ToolRequest::Control)
             .map_err(|error| format!("Invalid arguments: {error}")),
-        other => Err(format!("Unknown tool {other}. Use {GET_STATES} or {CONTROL}.")),
+        other => Err(format!(
+            "Unknown tool {other}. Use {GET_STATES} or {CONTROL}."
+        )),
     }
 }
 
