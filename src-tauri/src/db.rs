@@ -5,8 +5,17 @@ use rusqlite::Connection;
 use crate::error::AppError;
 
 /// Each entry upgrades the schema by one version. Never edit an existing entry.
-const MIGRATIONS: &[&str] =
-    &["CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL) STRICT;"];
+const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE settings (id INTEGER PRIMARY KEY CHECK (id = 1), data TEXT NOT NULL) STRICT;",
+    "CREATE TABLE interactions (
+        id INTEGER PRIMARY KEY,
+        created_at INTEGER NOT NULL,
+        request TEXT NOT NULL,
+        response TEXT NOT NULL,
+        results TEXT NOT NULL,
+        awaiting_confirmation INTEGER NOT NULL
+    ) STRICT;",
+];
 const LATEST_VERSION: u32 = MIGRATIONS.len() as u32;
 
 pub fn open(path: &Path) -> Result<Connection, AppError> {
@@ -68,7 +77,7 @@ mod tests {
     fn settings_persist_across_reopen() {
         let db = TempDb::new("reopen");
         let saved = Settings {
-            model: "gemma3:12b".into(),
+            active_model: Some("gemma-3-12b".into()),
             ..Settings::default()
         };
         settings::save(&open(&db.0).unwrap(), &saved).unwrap();
