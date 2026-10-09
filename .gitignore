@@ -1,0 +1,31 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+src-tauri/gen/
+
+# Local environment and secrets
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+*.key
+
+# Local data that must never be committed
+*.db
+*.db-*
+*.wav
+*.mp3
+*.flac
+*.gguf
+*.bin
+*.onnx
+*.tflite
+
+# Editors and OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.log
