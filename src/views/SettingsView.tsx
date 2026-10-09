@@ -1,21 +1,56 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, errorMessage, type Settings } from "../lib/api";
+import type { ConnectionStatus } from "../bindings/ConnectionStatus";
+import { ModelList } from "../components/ModelList";
+import {
+  api,
+  errorMessage,
+  type DiscoveredInstance,
+  type Settings,
+} from "../lib/api";
+import { useModels, useStatus } from "../lib/hooks";
 
-const CONTEXT_LENGTHS = [2048, 4096, 8192, 16384, 32768, 65536, 131072];
+const CONTEXT_LENGTHS = [4096, 8192, 16384, 32768];
+
+const CONNECTION_MESSAGES: Partial<Record<ConnectionStatus, string>> = {
+  connecting: "Connecting",
+  connected: "Connected",
+  reconnecting: "Can't reach Home Assistant. Retrying.",
+  authFailed:
+    "The access token was rejected. Create a new one in your Home Assistant profile.",
+  unsupportedVersion: "Home Assistant 2024.4 or later is required.",
+  tokenUnavailable:
+    "Luna couldn't read the saved access token. Enter it again.",
+};
 
 export function SettingsView() {
   const [saved, setSaved] = useState<Settings | null>(null);
   const [draft, setDraft] = useState<Settings | null>(null);
+  const [token, setToken] = useState("");
+  const [hasToken, setHasToken] = useState(false);
+  const [discovered, setDiscovered] = useState<DiscoveredInstance[]>([]);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const status = useStatus();
+  const { models, error: modelsError } = useModels();
 
   useEffect(() => {
-    Promise.all([api.getSettings(), api.getLaunchAtLogin()])
-      .then(([settings, launch]) => {
+    Promise.all([
+      api.getSettings(),
+      api.getLaunchAtLogin(),
+      api.hasHomeAssistantToken(),
+    ])
+      .then(([settings, launch, tokenSaved]) => {
         setSaved(settings);
         setDraft(settings);
         setLaunchAtLogin(launch);
+        setHasToken(tokenSaved);
+        if (!settings.homeAssistantUrl) {
+          api
+            .discoverHomeAssistant()
+            .then(setDiscovered)
+            .catch((err: unknown) => setError(errorMessage(err)));
+        }
       })
       .catch((err: unknown) => setError(errorMessage(err)));
   }, []);
@@ -26,8 +61,12 @@ export function SettingsView() {
 
   const update = (changes: Partial<Settings>) =>
     setDraft({ ...draft, ...changes });
-
-  const changed = JSON.stringify(draft) !== JSON.stringify(saved);
+  const changed =
+    token.trim() !== "" || JSON.stringify(draft) !== JSON.stringify(saved);
+  const connection = status && CONNECTION_MESSAGES[status.homeAssistant];
+  const suggestions = discovered.filter(
+    (instance) => instance.url !== draft.homeAssistantUrl,
+  );
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -35,9 +74,13 @@ export function SettingsView() {
     setSaving(true);
     setError(null);
     try {
-      const settings = await api.saveSettings(draft);
+      const settings = await api.saveSettings(draft, token.trim() || null);
       setSaved(settings);
       setDraft(settings);
+      setHasToken(
+        settings.homeAssistantUrl !== "" && (hasToken || token.trim() !== ""),
+      );
+      setToken("");
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -45,13 +88,9 @@ export function SettingsView() {
     }
   }
 
-  async function toggleLaunchAtLogin(enabled: boolean) {
+  function run(action: () => Promise<unknown>) {
     setError(null);
-    try {
-      setLaunchAtLogin(await api.setLaunchAtLogin(enabled));
-    } catch (err) {
-      setError(errorMessage(err));
-    }
+    action().catch((err: unknown) => setError(errorMessage(err)));
   }
 
   return (
@@ -60,6 +99,18 @@ export function SettingsView() {
 
       <fieldset>
         <legend>Home Assistant</legend>
+        {connection && <p className="status-line">{connection}</p>}
+        {suggestions.map((instance) => (
+          <button
+            key={instance.url}
+            type="button"
+            className="suggestion"
+            onClick={() => update({ homeAssistantUrl: instance.url })}
+          >
+            <span>{instance.name}</span>
+            <span className="model-details">{instance.url}</span>
+          </button>
+        ))}
         <label className="field">
           <span>Address</span>
           <input
@@ -70,27 +121,23 @@ export function SettingsView() {
             onChange={(e) => update({ homeAssistantUrl: e.target.value })}
           />
         </label>
+        <label className="field">
+          <span>Access token</span>
+          <input
+            className="input"
+            type="password"
+            autoComplete="off"
+            placeholder={hasToken ? "Saved" : ""}
+            value={token}
+            onChange={(e) => setToken(e.target.value)}
+          />
+        </label>
       </fieldset>
 
       <fieldset>
-        <legend>AI</legend>
-        <label className="field">
-          <span>Ollama address</span>
-          <input
-            className="input"
-            type="url"
-            value={draft.ollamaUrl}
-            onChange={(e) => update({ ollamaUrl: e.target.value })}
-          />
-        </label>
-        <label className="field">
-          <span>Model</span>
-          <input
-            className="input"
-            value={draft.model}
-            onChange={(e) => update({ model: e.target.value })}
-          />
-        </label>
+        <legend>AI Models</legend>
+        {models && <ModelList models={models} engine={status?.engine} />}
+        {modelsError && <p className="error">{modelsError}</p>}
         <label className="field">
           <span>Context length</span>
           <select
@@ -115,9 +162,23 @@ export function SettingsView() {
             type="checkbox"
             role="switch"
             checked={launchAtLogin}
-            onChange={(e) => toggleLaunchAtLogin(e.target.checked)}
+            onChange={(e) =>
+              run(() =>
+                api.setLaunchAtLogin(e.target.checked).then(setLaunchAtLogin),
+              )
+            }
           />
         </label>
+        <div className="toggle">
+          <span>Conversation history</span>
+          <button
+            className="button-link"
+            type="button"
+            onClick={() => run(api.clearHistory)}
+          >
+            Clear
+          </button>
+        </div>
       </fieldset>
 
       {error && (

@@ -1,4 +1,4 @@
-import { clearMocks, mockIPC } from "@tauri-apps/api/mocks";
+import { clearMocks } from "@tauri-apps/api/mocks";
 import {
   cleanup,
   fireEvent,
@@ -7,35 +7,8 @@ import {
   waitFor,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import type { Settings } from "../lib/api";
+import { mockBackend } from "../test/backend";
 import { SettingsView } from "./SettingsView";
-
-const stored: Settings = {
-  homeAssistantUrl: "",
-  ollamaUrl: "http://127.0.0.1:11434",
-  model: "qwen3:8b",
-  contextLength: 8192,
-};
-
-function mockBackend(onSave: (settings: Settings) => Settings): {
-  saved: Settings[];
-} {
-  const calls = { saved: [] as Settings[] };
-  mockIPC((cmd, args) => {
-    switch (cmd) {
-      case "get_settings":
-        return stored;
-      case "get_launch_at_login":
-        return false;
-      case "save_settings": {
-        const settings = (args as { settings: Settings }).settings;
-        calls.saved.push(settings);
-        return onSave(settings);
-      }
-    }
-  });
-  return calls;
-}
 
 describe("SettingsView", () => {
   afterEach(() => {
@@ -43,38 +16,77 @@ describe("SettingsView", () => {
     clearMocks();
   });
 
-  it("loads stored settings", async () => {
-    mockBackend((settings) => settings);
+  it("loads settings, status, and models", async () => {
+    mockBackend();
     render(<SettingsView />);
-    expect(await screen.findByDisplayValue("qwen3:8b")).toBeTruthy();
+    expect(
+      await screen.findByDisplayValue("http://homeassistant.local:8123"),
+    ).toBeTruthy();
+    expect(await screen.findByText("Connected")).toBeTruthy();
+    expect(await screen.findByText("Qwen3 8B")).toBeTruthy();
+    expect(screen.getByPlaceholderText("Saved")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
       "disabled",
       true,
     );
   });
 
-  it("saves changes", async () => {
-    const calls = mockBackend((settings) => settings);
+  it("saves a new access token without showing the saved one", async () => {
+    const calls = mockBackend({
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
     render(<SettingsView />);
-    fireEvent.change(await screen.findByDisplayValue("qwen3:8b"), {
-      target: { value: "gemma3:12b" },
+    fireEvent.change(await screen.findByLabelText("Access token"), {
+      target: { value: "new-token" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
-    await waitFor(() => expect(calls.saved).toHaveLength(1));
-    expect(calls.saved[0]?.model).toBe("gemma3:12b");
+    await waitFor(() =>
+      expect(calls.some((call) => call.cmd === "save_settings")).toBe(true),
+    );
+    const save = calls.find((call) => call.cmd === "save_settings");
+    expect((save?.args as { token: string }).token).toBe("new-token");
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("Access token") as HTMLInputElement).value,
+      ).toBe(""),
+    );
+  });
+
+  it("suggests discovered instances when no address is set", async () => {
+    mockBackend({
+      get_settings: () => ({
+        homeAssistantUrl: "",
+        activeModel: null,
+        contextLength: 4096,
+      }),
+      discover_home_assistant: () => [
+        { name: "Home", url: "http://10.0.0.2:8123" },
+      ],
+    });
+    render(<SettingsView />);
+    fireEvent.click(await screen.findByRole("button", { name: /Home/ }));
+    expect(screen.getByDisplayValue("http://10.0.0.2:8123")).toBeTruthy();
   });
 
   it("shows the backend's message when saving fails", async () => {
-    mockBackend(() => {
-      throw { message: "Enter a model name." };
+    mockBackend({
+      save_settings: () => {
+        throw {
+          message:
+            "Enter a Home Assistant address like http://homeassistant.local:8123.",
+        };
+      },
     });
     render(<SettingsView />);
-    fireEvent.change(await screen.findByDisplayValue("qwen3:8b"), {
-      target: { value: "" },
-    });
+    fireEvent.change(
+      await screen.findByDisplayValue("http://homeassistant.local:8123"),
+      {
+        target: { value: "nope" },
+      },
+    );
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     expect((await screen.findByRole("alert")).textContent).toBe(
-      "Enter a model name.",
+      "Enter a Home Assistant address like http://homeassistant.local:8123.",
     );
   });
 });

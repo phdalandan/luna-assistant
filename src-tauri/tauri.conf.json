@@ -28,10 +28,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": [
-      "dmg",
-      "nsis"
-    ],
+    "targets": ["dmg", "nsis"],
     "category": "Utility",
     "shortDescription": "Local voice assistant for Home Assistant",
     "copyright": "Copyright 2026 Luna contributors",
@@ -51,8 +48,6 @@
         "installMode": "currentUser"
       }
     },
-    "externalBin": [
-      "binaries/llama-server"
-    ]
+    "externalBin": ["binaries/llama-server"]
   }
 }
