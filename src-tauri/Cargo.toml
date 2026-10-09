@@ -1,0 +1,37 @@
+[package]
+name = "luna"
+version = "0.1.0"
+description = "Privacy-first local voice assistant for Home Assistant"
+license = "Apache-2.0"
+edition = "2024"
+rust-version = "1.90"
+publish = false
+
+[lib]
+name = "luna_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[dependencies]
+log = "0.4.34"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+tauri = { version = "2.12", features = ["tray-icon", "image-png"] }
+tauri-plugin-autostart = "2.7"
+tauri-plugin-log = "2.10"
+tauri-plugin-single-instance = "2.5"
+thiserror = "2.0.21"
+url = "2.5.8"
+
+[build-dependencies]
+tauri-build = "2.7"
+
+[dev-dependencies]
+ts-rs = "12.0.1"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "s"
+panic = "abort"
+strip = true

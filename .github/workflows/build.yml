@@ -1,0 +1,226 @@
+name: Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, for example 0.1.0
+        required: true
+        type: string
+      create_release:
+        description: Create a draft GitHub Release with both installers
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Validate version
+        id: version
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "::error::Version must be MAJOR.MINOR.PATCH, for example 0.1.0."
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Check tag is unused
+        if: inputs.create_release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ inputs.version }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > /dev/null 2>&1; then
+            echo "::error::Tag $TAG already exists."
+            exit 1
+          fi
+
+  checks:
+    name: Frontend and formatting checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: npm ci
+      - run: npm run format:check
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm test
+      - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: [prepare, checks]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: macOS
+            runner: macos-latest
+            target: aarch64-apple-darwin
+            bundle: dmg
+            pattern: "*.dmg"
+            suffix: macos-arm64.dmg
+          - name: Windows
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            bundle: nsis
+            pattern: "*-setup.exe"
+            suffix: windows-x64-setup.exe
+    env:
+      VERSION: ${{ needs.prepare.outputs.version }}
+      MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE != '' }}
+      MACOS_NOTARIZATION: ${{ secrets.APPLE_ID != '' }}
+      WINDOWS_SIGNING: ${{ secrets.WINDOWS_CERTIFICATE != '' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@686976e191b89faba57d3206551f0f330d8cb249 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+          components: clippy
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - run: npm ci
+
+      - name: Lint Rust
+        working-directory: src-tauri
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Test Rust
+        working-directory: src-tauri
+        run: cargo test --locked
+
+      - name: Check generated TypeScript bindings
+        run: |
+          if [ -n "$(git status --porcelain -- src/bindings)" ]; then
+            echo "::error::src/bindings is out of date. Run cargo test in src-tauri and commit the result."
+            git status --porcelain -- src/bindings
+            exit 1
+          fi
+
+      - name: Import Windows signing certificate
+        if: matrix.bundle == 'nsis' && env.WINDOWS_SIGNING == 'true'
+        shell: pwsh
+        env:
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+        run: |
+          $path = Join-Path $env:RUNNER_TEMP "certificate.pfx"
+          [IO.File]::WriteAllBytes($path, [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE))
+          $password = ConvertTo-SecureString $env:WINDOWS_CERTIFICATE_PASSWORD -AsPlainText -Force
+          $certificate = Import-PfxCertificate -FilePath $path -CertStoreLocation Cert:\CurrentUser\My -Password $password
+          Remove-Item $path
+          "WINDOWS_CERTIFICATE_THUMBPRINT=$($certificate.Thumbprint)" >> $env:GITHUB_ENV
+
+      - name: Build installer
+        env:
+          SECRET_APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          SECRET_APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          SECRET_APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          SECRET_APPLE_ID: ${{ secrets.APPLE_ID }}
+          SECRET_APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          SECRET_APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          # Tauri treats empty signing variables as configured, so export them only when set.
+          if [ "${{ matrix.bundle }}" = "dmg" ] && [ "$MACOS_SIGNING" = "true" ]; then
+            export APPLE_CERTIFICATE="$SECRET_APPLE_CERTIFICATE"
+            export APPLE_CERTIFICATE_PASSWORD="$SECRET_APPLE_CERTIFICATE_PASSWORD"
+            export APPLE_SIGNING_IDENTITY="$SECRET_APPLE_SIGNING_IDENTITY"
+            if [ "$MACOS_NOTARIZATION" = "true" ]; then
+              export APPLE_ID="$SECRET_APPLE_ID"
+              export APPLE_PASSWORD="$SECRET_APPLE_PASSWORD"
+              export APPLE_TEAM_ID="$SECRET_APPLE_TEAM_ID"
+            fi
+          fi
+
+          config="{\"version\":\"$VERSION\"}"
+          if [ -n "${WINDOWS_CERTIFICATE_THUMBPRINT:-}" ]; then
+            config="{\"version\":\"$VERSION\",\"bundle\":{\"windows\":{\"certificateThumbprint\":\"$WINDOWS_CERTIFICATE_THUMBPRINT\",\"digestAlgorithm\":\"sha256\",\"timestampUrl\":\"http://timestamp.digicert.com\"}}}"
+          fi
+
+          npx tauri build --ci --target "${{ matrix.target }}" --bundles "${{ matrix.bundle }}" --config "$config"
+
+      - name: Collect installer
+        run: |
+          dir="src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}"
+          mapfile -t files < <(find "$dir" -maxdepth 1 -name "${{ matrix.pattern }}")
+          if [ "${#files[@]}" -ne 1 ]; then
+            echo "::error::Expected one installer in $dir, found ${#files[@]}."
+            exit 1
+          fi
+          mkdir -p installer
+          cp "${files[0]}" "installer/Luna-$VERSION-${{ matrix.suffix }}"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: Luna-${{ env.VERSION }}-${{ matrix.suffix }}
+          path: installer/*
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    if: inputs.create_release
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: installers
+          merge-multiple: true
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          tag="v$VERSION"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::A release for $tag already exists. Existing assets are never overwritten."
+            exit 1
+          fi
+          ls -l installers
+          gh release create "$tag" installers/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "Luna $VERSION" \
+            --generate-notes \
+            --draft
