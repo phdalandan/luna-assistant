@@ -108,7 +108,7 @@ Normal error handling is allowed: retrying a temporarily disconnected Home Assis
 
 ## Checks
 
-Build the bundled runtime once first: `scripts/build-llama-server.sh`.
+Build the bundled runtime first if it is missing: `npm run runtime`.
 
 ```sh
 npm run format:check && npm run lint && npm run typecheck && npm test

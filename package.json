@@ -12,7 +12,8 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "runtime": "node scripts/ensure-llama-server.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.2",

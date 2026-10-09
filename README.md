@@ -52,13 +52,12 @@ Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tr
 
 Prerequisites: Node.js 22, Rust (stable), CMake, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
-Build the bundled llama.cpp server once (and again whenever `scripts/build-llama-server.sh` changes):
-
 ```sh
-scripts/build-llama-server.sh
 npm ci
 npm run tauri dev
 ```
+
+The first run builds the bundled llama.cpp server (a few minutes). It is rebuilt only when the pinned version in `scripts/build-llama-server.sh` changes. On Windows this needs Git Bash on the `PATH`.
 
 Checks:
 
