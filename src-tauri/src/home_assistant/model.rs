@@ -77,11 +77,19 @@ pub struct Entity {
     pub area_id: Option<String>,
     pub state: String,
     pub attributes: Map<String, Value>,
-    /// Hidden or configuration/diagnostic entities are never part of broad selections.
-    pub internal: bool,
+    /// Hidden in Home Assistant. Never offered to the model or matched by name.
+    pub hidden: bool,
+    /// A configuration or diagnostic entity, such as "Guest WIFI 2.4G" on a router. Found only
+    /// when its own name is used.
+    pub configuration: bool,
 }
 
 impl Entity {
+    /// Never part of broad selections such as a whole area or every light.
+    pub fn internal(&self) -> bool {
+        self.hidden || self.configuration
+    }
+
     pub fn domain(&self) -> &str {
         self.id.split_once('.').map_or("", |(domain, _)| domain)
     }
@@ -182,11 +190,31 @@ impl Home {
                 .map(|entry| flatten(entry.aliases.clone()))
                 .unwrap_or_default(),
             area_id,
-            internal: entry
-                .is_some_and(|entry| entry.hidden_by.is_some() || entry.entity_category.is_some()),
+            hidden: entry.is_some_and(|entry| entry.hidden_by.is_some()),
+            configuration: entry.is_some_and(|entry| entry.entity_category.is_some()),
             id: state.entity_id,
             state: state.state,
             attributes: state.attributes,
+        }
+    }
+
+    /// Marks an entity as a configuration entity in the registry, as Home Assistant does.
+    #[cfg(test)]
+    pub fn register_configuration(&mut self, entity_id: &str) {
+        self.entity_registry.insert(
+            entity_id.to_owned(),
+            EntityEntry {
+                entity_id: entity_id.to_owned(),
+                name: None,
+                area_id: None,
+                device_id: None,
+                aliases: Vec::new(),
+                hidden_by: None,
+                entity_category: Some("config".into()),
+            },
+        );
+        if let Some(entity) = self.entities.get_mut(entity_id) {
+            entity.configuration = true;
         }
     }
 
@@ -450,9 +478,11 @@ mod tests {
     #[test]
     fn hidden_and_config_entities_are_internal() {
         let home = home();
-        assert!(home.entity("switch.hidden_relay").unwrap().internal);
-        assert!(home.entity("switch.kitchen_child_lock").unwrap().internal);
-        assert!(!home.entity("switch.tv_plug").unwrap().internal);
+        let relay = home.entity("switch.hidden_relay").unwrap();
+        assert!(relay.hidden && relay.internal());
+        let child_lock = home.entity("switch.kitchen_child_lock").unwrap();
+        assert!(child_lock.configuration && !child_lock.hidden && child_lock.internal());
+        assert!(!home.entity("switch.tv_plug").unwrap().internal());
     }
 
     #[test]

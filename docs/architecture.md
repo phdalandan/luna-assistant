@@ -31,7 +31,7 @@ text input ─▶ router (Rust) ─┬─▶ recognised and unambiguous: time, u
                                  ─▶ tool calls ─▶ resolver ─▶ validator ─▶ executor ─▶ verified reply
 ```
 
-- **Router** (`assistant/route.rs`) handles a small grammar of commands, questions, and brightness or temperature settings. It acts only when the words resolve to exactly one entity, or to every matching device in one area for plurals like "kitchen lights". "What about the AC?" or "and the kitchen?" repeats the previous directly answered question for the new subject. A device word alone ("the AC") means every device of that kind: one is acted on, two to four get "Which one: …?", more go to the model. Anything broad or with exceptions goes to the model. Filler words ("sorry", "back", "again", "for me") are ignored unless a device is named with them. A statement about a state ("it's on I think") rechecks Home Assistant and changes nothing. "Check X" and "X status" read any state. An answer to "Which one?" ("first one", "both", a name) completes the original request. A bare device phrase ("the hallway too", "and the kitchen") or a bare value ("actually 22") repeats the previous direct request for it. Temperature questions read climate devices and temperature sensors. The phrasings that must never reach the model are listed in one test, `everyday_requests_are_answered_without_the_model`; a new phrasing that should be instant is added there first.
+- **Router** (`assistant/route.rs`) handles a small grammar of commands, questions, and brightness or temperature settings. It acts only when the words resolve to exactly one entity, or to every matching device in one area for plurals like "kitchen lights". "What about the AC?" or "and the kitchen?" repeats the previous directly answered question for the new subject. A device word alone ("the AC") means every device of that kind: one is acted on, two to four get "Which one: …?" for changes or an answer for each for questions, more go to the model. When a name fits several devices and only one of them was just talked about, that one is meant ("the 5G" after a question about the guest Wi-Fi). "Is X enabled" asks whether it is on, and a misheard "It's the X on?" is read as "Is the X on?". Short names with a number ("5G") count when deciding whether a follow-up is for Luna. Anything broad or with exceptions goes to the model. Filler words ("sorry", "back", "again", "for me") are ignored unless a device is named with them. A statement about a state ("it's on I think") rechecks Home Assistant and changes nothing. "Check X" and "X status" read any state. An answer to "Which one?" ("first one", "both", a name) completes the original request. A bare device phrase ("the hallway too", "and the kitchen") or a bare value ("actually 22") repeats the previous direct request for it. Temperature questions read climate devices and temperature sensors. The phrasings that must never reach the model are listed in one test, `everyday_requests_are_answered_without_the_model`; a new phrasing that should be instant is added there first. Hidden entities are never matched. Configuration and diagnostic entities (such as a router's "Guest WIFI 2.4G") are left out of areas, floors, and kinds of device, but are found when every word of the phrase is in their own name and no regular device fits. "Wi-Fi" and "wi fi" are read as "wifi".
 - **Model** sees two tools, `get_states` and `control`, and never names services. When it only calls `control`, the reply is built from the verified results without a second pass. `get_states` needs a second pass to answer; a read matching more than 25 entities returns counts by type and asks the model to narrow it, never a partial list. Calls that act on the same entity in conflicting ways are rejected before anything runs. Exclusions are rejected unless the request names an exception. Areas and floors may be named by ID or by a name or alias that fits exactly one, so "Front Porch" does not cost a second pass. Tool definitions are kept short (about 1,140 prefix tokens with instructions) because they are evaluated whenever the prompt cache is cold.
 - **Prompt layout.** The system message holds the instructions and the floor and area layout, followed by the tools. It only changes when Home Assistant's registries change, so llama.cpp reuses its cache. Per-request facts go in the user message: recently referenced entities with live states, up to 15 relevant entities, states before the last action (only when the request refers back, at most 10), and the Home Assistant time when asked. When a request names a kind of device, room words in entity names do not pull in other kinds. The tool schema keeps its declared property order (`serde_json` `preserve_order`) because llama.cpp's grammar enforces it.
 - **Conversation memory** (`assistant/session.rs`) is kept in Rust for 2 minutes after the last request, then the conversation and its history are cleared. The window counts down to the reset. Every launch starts with an empty conversation. Memory holds the entities the last turn referred to with what Luna reported, and states from before the last action. "Revert that" restores those states through the validator, so unlocking or opening still asks for confirmation. Remembered states are never presented as current; replies always read the live cache, and "are you sure" fetches every state from Home Assistant again.
@@ -39,7 +39,7 @@ text input ─▶ router (Rust) ─┬─▶ recognised and unambiguous: time, u
 - **Cache.** One WebSocket connection loads the registries and all states once, then `state_changed` events keep states current. Registry events reload only the four registries, alongside event handling, and rebuild metadata over the cached states; a registry event during a reload queues one more reload.
 - **Execution.** Service calls for one plan run concurrently. Verification waits on `state_changed` events and stops as soon as every device is confirmed or reports it is moving.
 - **Metrics.** Each request logs its route, model passes, prompt and cached tokens, prompt and generation time, service call time, and verification time. Every model tool call and every rejection reason is logged.
-- **Reply wording** (`assistant/phrasing.rs`) is built in Rust from verified results, never by another model pass. Acknowledgements rotate in a fixed order kept in conversation memory ("Done.", "You got it.", "Turned off.", "All set."), so wording varies without randomness. A single device the user named, or called "it", is not named again. More than three devices get a count ("Done. All 6 devices are off."). Partial failures always name what did not work. Yes-or-no questions answer from the live state ("Nope, it's closed."). Security-sensitive results after confirmation always name the device.
+- **Reply wording** (`assistant/phrasing.rs`) is built in Rust from verified results, never by another model pass. A yes-or-no question about several devices answers casually with the names they do not share and offers the rest ("Yes, but only the 2.4G. Want me to turn on the 5G too?"); unavailable devices are left out. The offer is kept in conversation memory for one turn and carried out through the validator when the next reply is a yes ("yep", "sure", "absolutely", "yeah, go ahead"); anything that is not entirely a yes or no drops it. A model reply drops sentences that narrate ("I'll ask for clarification.") and keeps at most two. Acknowledgements rotate in a fixed order kept in conversation memory ("Done.", "You got it.", "Turned off.", "All set."), so wording varies without randomness. A single device the user named, or called "it", is not named again. More than three devices get a count ("Done. All 6 devices are off."). Partial failures always name what did not work. Yes-or-no questions answer from the live state ("Nope, it's closed."). Security-sensitive results after confirmation always name the device.
 - **Honest replies.** If the model's action is rejected because the device cannot do it, the reply says so even when another action succeeded. The out-of-scope reply is never used after a tool call. The window warm-up runs only when the model is not already loaded, so it never evicts a conversation in progress.
 
 ## Cloud inference
@@ -61,40 +61,39 @@ Voice is off until the user turns on listening, which needs the speech models (d
 
 ```
 microphone (CPAL, mono) ─▶ resample to 16 kHz ─▶ 5 s rolling buffer ─▶ wake word (sherpa-onnx KWS, "Luna")
-  on wake: load VAD + whisper ─▶ replay the buffer into the VAD ─▶ capture until 0.6 s of silence
-  ─▶ whisper.cpp transcript ─▶ addressing check ─▶ same request path as typed text ─▶ spoken reply (OS voice)
-  ─▶ follow-ups without the name for 20 s (8 s of silence ends it) ─▶ passive: VAD, whisper, and audio released
+  on wake: start the voice helper, load VAD, load Parakeet on its own thread ─▶ replay the buffer into the VAD
+  ─▶ capture until 0.6 s of silence ─▶ Parakeet transcript ─▶ addressing check ─▶ same request path as typed text ─▶ spoken reply (OS voice)
+  ─▶ follow-ups without the name for 20 s (8 s of silence ends it) ─▶ passive: VAD, Parakeet, and audio released
 ```
 
-- **Passive.** Only the wake word spotter runs. Audio lives in a fixed 5 second ring buffer that overwrites itself; nothing is transcribed, logged, or stored. Speech detection and whisper are not loaded.
+- **Passive.** Only the wake word spotter runs. Audio lives in a fixed 5 second ring buffer that overwrites itself; nothing is transcribed, logged, or stored. Speech detection and Parakeet are not loaded.
 - **Wake word.** "Luna" by default; the user can choose any name of one to three words (letters and apostrophes) in Settings, and listening restarts with it. The keyword model is open-vocabulary, so no training is needed: `voice/keyword.rs` spells the name in the model's word pieces with the model's own sentencepiece unigram scores (`bpe.model`), matching the official tokenizer on every name tested. The addressing check uses the same name and accepts a one-letter mishearing for names of four or more letters ("Lunar" for "Luna"); shorter names must match exactly. Short or common words trigger more often.
 - **Wake word anywhere.** The spotter is streaming and fires wherever the name is said. The ring buffer keeps the speech before it, so "Turn off the lights, Luna" is captured whole. Speech separated from the wake word by more than a second of silence is left out.
 - **Addressing** (`voice/address.rs`). The transcript must use the name to address Luna: at the start ("Luna, …", "Hey Luna …"), at the end ("…, Luna?"), or set off by commas ("Could you, Luna, …"). "I saw Luna at the park" is ignored. The name is removed before the request is handled. When the name sits between two sentences, the one that reads as a home request is used. The name alone gets "Yes?" and waits for the request.
-- **Follow-ups** (`assistant/relevance.rs`). During the conversation window, speech without the name is handled only if it is clearly for Luna: a recognised request, an action or question about "it", or a device, room, or floor in this home. Everything else is dropped without logging its text and never extends the window. "Thanks" is answered and ends the conversation; "never mind" ends it silently. "Yes" and "no" answer a pending confirmation. No model pass is used to classify speech.
+- **Follow-ups** (`assistant/relevance.rs`). During the conversation window, speech without the name is handled only if it is clearly for Luna: a recognised request, an action or question about "it", or a device, room, or floor in this home. Everything else is dropped without logging its text and never extends the window. "Thanks" is answered and ends the conversation; "never mind" ends it silently. "Yes" and "no" answer a pending confirmation. Replies that dispute Luna ("Yes you can", "That's wrong", "Check again") and anything mentioning Home Assistant or an entity are handled too. No model pass is used to classify speech.
 - **Context.** Spoken requests use the same conversation memory as typed ones (referenced devices, last action, pending "Which one?"), so "make it 50%" and "revert that" work by voice. The voice window (20 s) is separate from that memory (2 minutes).
 - **Timing.** Buffer 5 s, conversation window 20 s, silence timeout 8 s, false-wake check 1.5 s, longest request 15 s. Defaults are in `voice::Timing` and should be tuned with real use.
 - **Half duplex.** While Luna transcribes, thinks, or speaks, microphone audio is dropped at the source, so she never hears herself and audio never queues up.
 - **Stopping.** Turning listening off (window or tray) closes the microphone immediately, cancels any request so its reply is never spoken, and waits for the voice thread. A disconnected or denied microphone stops listening and explains why. Quitting stops voice first.
 - **Cloud speech recognition.** Settings → Voice has its own Local / Cloud control, Local by default, independent of the AI model choice; changing it restarts listening. Cloud sends only the captured request (16-bit WAV, after the wake word, at most 15 s) to OpenAI `gpt-transcribe` with the same names whisper is primed with (`voice::vocabulary_prompt`) and an English language hint. Anthropic has no speech-to-text API, so this always uses the OpenAI key. Whisper is not loaded in this mode; the wake word, speech detection, and Kokoro stay local. A failed request speaks the reason ("Check your OpenAI API key."); a failed follow-up is dropped. Stopping listening cancels the upload. The transcript is never logged.
-- **Speech output** is Kokoro v1.0, synthesised by the separate voice helper and played by Luna through CPAL, so the window's animation follows the real voice. The user picks one of eight English voices in Settings (Heart is the default). The helper starts when the wake word is heard, so its model loads while the user is still speaking, and exits when the conversation ends. If it cannot start or exits, listening stops and says so.
+- **Speech output** is Kokoro v1.0, synthesised by the separate voice helper and played by Luna through CPAL, so the window's animation follows the real voice. The user picks one of eight English voices in Settings (Heart is the default). The helper starts first when the wake word is heard, before speech detection and whisper load, so its model loads while the user is still speaking, and exits when the conversation ends. If it cannot start or exits, listening stops and says so.
 
 ### Speech models
 
-All four are downloaded together in Settings (558 MB), verified against the catalogue SHA-256, and never bundled. Archives are checksummed, then only the files and folders the catalogue names are extracted (paths that would leave the folder are skipped); the archive is then deleted and a marker records which verified archive the folder came from.
+All four are downloaded together in Settings (850 MB), verified against the catalogue SHA-256, and never bundled. Archives are checksummed, then only the files and folders the catalogue names are extracted (paths that would leave the folder are skipped); the archive is then deleted and a marker records which verified archive the folder came from.
 
-| Model                   | Source                                                     | Size    | Licence    |
-| ----------------------- | ---------------------------------------------------------- | ------- | ---------- |
-| KWS zipformer 3.3M      | k2-fsa sherpa-onnx `kws-models` release (gigaspeech, int8) | 17.6 MB | Apache-2.0 |
-| Silero VAD              | k2-fsa sherpa-onnx `asr-models` release                    | 0.6 MB  | MIT        |
-| Whisper small.en (q5_1) | `ggerganov/whisper.cpp@5359861`                            | 190 MB  | MIT        |
-| Kokoro v1.0 (fp32)      | k2-fsa sherpa-onnx `tts-models` release (multi-lang v1.0)  | 350 MB  | Apache-2.0 |
+| Model                       | Source                                                         | Size    | Licence    |
+| --------------------------- | -------------------------------------------------------------- | ------- | ---------- |
+| KWS zipformer 3.3M          | k2-fsa sherpa-onnx `kws-models` release (gigaspeech, int8)     | 17.6 MB | Apache-2.0 |
+| Silero VAD                  | k2-fsa sherpa-onnx `asr-models` release                        | 0.6 MB  | MIT        |
+| Parakeet TDT 0.6B v2 (int8) | k2-fsa sherpa-onnx `asr-models` release (NVIDIA NeMo, English) | 482 MB  | CC-BY-4.0  |
+| Kokoro v1.0 (fp32)          | k2-fsa sherpa-onnx `tts-models` release (multi-lang v1.0)      | 350 MB  | Apache-2.0 |
 
 The k2-fsa models are published only as GitHub release assets, so the catalogue also trusts `github.com/k2-fsa/sherpa-onnx/releases/download/`. Checksums apply as for every model.
 
 ### Native libraries
 
 - **sherpa-onnx 1.13.8** (wake word, VAD, ONNX Runtime) is linked statically from the official `no-tts` release archives. The full archives include espeak-ng (GPL-3.0) for sherpa's own speech synthesis, which Luna does not use, and the `sherpa-onnx-sys` build script links them unconditionally and downloads them unverified. `.cargo/config.toml` replaces that build script's output (`links = "sherpa-onnx"`), and `scripts/fetch-sherpa-onnx.mjs` (part of `npm run runtime`) downloads and checks the pinned archive. Windows uses the `MD` (dynamic C runtime) build.
-- **whisper.cpp 1.8.3** is compiled in-process by `whisper-rs-sys` through CMake, with bindings generated by bindgen, which needs libclang (LLVM) on the build machine. Portable AVX2 code on x86, Metal on Apple Silicon. The `cmake` crate drops optimisation from release flags with the Visual Studio generator, so `.cargo/config.toml` sets them. Unoptimised, a transcription took 17 s instead of about 1.3 s.
 
 ### Voice helper (GPL-3.0)
 
@@ -104,7 +103,7 @@ Protocol, integers little-endian:
 
 - Arguments: model, voices, tokens, lexicon, espeak-ng data folder, language.
 - Once the model is loaded and warmed up with one silent synthesis, the helper writes the sample rate as a `u32`.
-- Each stdin line `id<TAB>speaker<TAB>speed<TAB>text` produces frames of `u32 id, u32 count, count × f32 samples`, one per sentence as it is ready, then a frame with count 0. A count of `u32::MAX` means synthesis failed.
+- Each stdin line `id<TAB>speaker<TAB>speed<TAB>text` produces frames of `u32 id, u32 count, count × f32 samples`, one per sentence as it is ready, then a frame with count 0. A count of `u32::MAX` means synthesis failed. When at least four words follow the first sentence's first comma, the clause before it ("Yes,") is synthesised on its own with its trailing silence trimmed, so playback starts while the rest is made. Shorter sentences stay whole: a clause spoken alone is drawn out.
 - It exits when stdin closes, so it never outlives Luna.
 
 int8 Kokoro was measured first and rejected: 3 to 4 s for "Done." against 0.5 s for fp32 on this CPU.
@@ -113,22 +112,22 @@ int8 Kokoro was measured first and rejected: 3 to 4 s for "Done." against 0.5 s 
 
 Windows 11, AMD Ryzen 9 6900HS (8 cores, 16 threads), release build, synthetic voices (Windows David and Zira, 16 kHz). Not yet measured on macOS.
 
-| What                                   | Result                                                                                                                        |
-| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| Passive listening, real microphone     | About 4% of one core (3.9%, 4.1%, and 8.0% over three 60 s runs); 71 MB resident                                              |
-| Wake word spotting alone               | 33 ms of one core per second of audio; model +24 MB                                                                           |
-| Wake word, 17 recordings with "Luna"   | Detected in every one: name at the start, middle, end, or alone                                                               |
-| Wake word, 9 recordings without it     | No detections ("lunar eclipse", "tuna", "lunch", a 10 s paragraph)                                                            |
-| Mention ("I saw Luna at the park")     | Wake word fires; the addressing check ignores it                                                                              |
-| Whisper small.en q5_1                  | Loaded in 300 to 400 ms, +300 MB, released when the conversation ends; 0.7 s per request (2 to 5 s), 1.8 s for 11 s of speech |
-| Stop while processing, microphone loss | Voice thread finished 36 to 126 ms later; the cancelled reply was not spoken                                                  |
-| Kokoro fp32 in the voice helper        | Loads in 2.5 s plus a 1.5 s warm-up, 465 MB while a conversation lasts; 0.5 s to synthesise "Done."                           |
-| Reply ready to first sound             | About 0.55 s for follow-ups; 1 to 2.5 s for the first reply after the wake word, while the helper is still loading            |
+| What                                    | Result                                                                                                                                                                                                                                                        |
+| --------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Passive listening, real microphone      | About 4% of one core (3.9%, 4.1%, and 8.0% over three 60 s runs); 71 MB resident                                                                                                                                                                              |
+| Wake word spotting alone                | 33 ms of one core per second of audio; model +24 MB                                                                                                                                                                                                           |
+| Wake word, 17 recordings with "Luna"    | Detected in every one: name at the start, middle, end, or alone                                                                                                                                                                                               |
+| Wake word, 9 recordings without it      | No detections ("lunar eclipse", "tuna", "lunch", a 10 s paragraph)                                                                                                                                                                                            |
+| Mention ("I saw Luna at the park")      | Wake word fires; the addressing check ignores it                                                                                                                                                                                                              |
+| Parakeet TDT 0.6B v2 int8               | Loads in 3.5 to 4.2 s on its own thread while the user speaks, released when the conversation ends; 0.23 s per request (4 threads). 20 of 20 synthetic commands exact, against 16 of 20 for whisper small.en at 0.77 s ("Is the AC on?" came out "ACON ACON") |
+| Stop while processing, microphone loss  | Voice thread finished 36 to 126 ms later; the cancelled reply was not spoken                                                                                                                                                                                  |
+| Kokoro fp32 in the voice helper         | Loads in 2.5 s plus a 1.5 s warm-up, 465 MB while a conversation lasts; 0.5 s to synthesise "Done."                                                                                                                                                           |
+| Reply ready to first sound              | About 0.55 s for follow-ups; 1 to 2.5 s for the first reply after the wake word, while the helper is still loading                                                                                                                                            |
+| Synthesis to first audio (October 2026) | Ryzen 9 6900HS, 8 threads: 0.45 s for "Done.", 0.6 s for "Yep, it's on.", 0.46 s for "Yes, but only the 2.4G. …" (1.25 s before splitting the first clause). 4 threads 0.8 s, 12 threads 0.5 s, 16 threads 0.73 s for "Done."                                 |
 
-From the end of a request, Luna waits 0.6 s of silence, then transcribes (about 0.7 s with small.en) before handling it. Recognised requests then take milliseconds; a misheard device name falls through to the AI model, which takes 10 to 20 s on CPU, so transcription accuracy matters more than raw speed.
+From the end of a request, Luna waits 0.6 s of silence, then transcribes (about 0.25 s with Parakeet) before handling it. Recognised requests then take milliseconds; a misheard device name falls through to the AI model, which takes 10 to 20 s on CPU, so transcription accuracy matters more than raw speed.
 
-- **Transcription accuracy.** Whisper is primed with the home's room and device names (`assistant::vocabulary`, cut at a name to 400 characters and 120 tokens) so they are spelled as in Home Assistant; real use had mistranscribed "porch light" as "Porsche Lite" with base.en. small.en replaced base.en for accuracy on real voices.
-- **Transcription window.** Whisper encodes a 30 s window by default. Luna sizes it to the request plus 1.3 s, but never under 256 frames (5 s): shorter windows made whisper repeat itself ("Jarvis turn off the lights Jarvis turn off the lights"). Measured on 35 clips: 30 s window 1.3 s (base.en); 256-frame minimum 0.7 s (small.en) with every transcript correct; 512 frames 1.3 s; 768 frames 2 s.
+- **Transcription model.** Parakeet TDT 0.6B v2 (NVIDIA, English) replaced whisper small.en, which misheard short device names ("Is the AC on?" as "ACON ACON" and "Is the ASEAN"). It runs through sherpa-onnx, which Luna already links, so no new runtime was added. It loads in about 4 s, so it loads on its own thread at the wake word while the voice thread keeps reading the microphone; the first request waits for it only if it is said and finished within that time. Audio shorter than 1 s is padded with silence, because the model aborts the process on input too short to make features (seen with an empty recording). sherpa-onnx hotwords with `modified_beam_search` were tried with the home's names and did not help (17 of 20, and one dropped word), so greedy decoding is used and names are not primed. `transcription_accuracy_on_labelled_recordings` measures any folder of labelled recordings.
 
 ## Local inference
 
@@ -186,10 +185,10 @@ Memory: Luna estimates `file size + KV cache × context + 768 MB` and warns when
 - **Processors without AVX2.** The Windows runtime will not start on them. Luna reports that the model could not load.
 - **macOS microphone in the background.** `Info.plist` provides `NSMicrophoneUsageDescription`. A signed app is needed for a stable TCC permission. Untested.
 - **Windows microphone privacy.** Desktop apps can be blocked by "Let desktop apps access your microphone". Luna explains this when CPAL reports access denied; whether Windows reports denial or delivers silence has not been tested.
-- **macOS voice.** The Metal whisper build, the voice helper, and speaker output have not been built or run on macOS.
-- **Memory during a conversation.** Whisper (about 300 MB) and the voice helper (about 465 MB) are loaded only between the wake word and the end of the conversation, but together they need about 800 MB then.
+- **macOS voice.** Parakeet, the voice helper, and speaker output have not been built or run on macOS.
+- **Memory during a conversation.** Parakeet (about 650 MB) and the voice helper (about 465 MB) are loaded only between the wake word and the end of the conversation, but together they need about 800 MB then.
 - **Wake word accuracy.** Measured only with synthetic voices. False accepts per hour and miss rate with real voices, accents, and background noise are unknown. "Luna" is a short keyword, and custom wake words were checked only with "Jarvis"; the score and threshold in the catalogue may need tuning.
-- **Build machines** need CMake and libclang (LLVM) for whisper.cpp. GitHub's Windows and macOS runners include both.
+- **Build machines** need CMake for the bundled llama-server. GitHub's Windows and macOS runners include it.
 - **Device changes.** CPAL does not emit device-change events on all hosts.
 - **Tray behaviour differs.** macOS shows the menu on click; Windows opens the window on left click and the menu on right click.
 - **Linux.** Not a target. Linux builds are used only for local development checks.
@@ -213,22 +212,22 @@ Requirements: offline, Windows and macOS, low CPU and memory, licence compatible
 
 Luna is Apache-2.0. Direct dependencies:
 
-| Component                                                   | Licence                      | Bundled                    |
-| ----------------------------------------------------------- | ---------------------------- | -------------------------- |
-| Tauri, plugins (autostart, log, single-instance)            | Apache-2.0 / MIT             | Yes                        |
-| React, Vite, TypeScript                                     | MIT / Apache-2.0             | Yes (React)                |
-| llama.cpp (`llama-server`, ggml)                            | MIT                          | Yes                        |
-| rusqlite, SQLite                                            | MIT, public domain           | Yes                        |
-| tokio, tokio-util, futures-util, reqwest, tokio-tungstenite | MIT / Apache-2.0             | Yes                        |
-| rustls, ring, rustls-platform-verifier                      | Apache-2.0 / MIT / ISC       | Yes                        |
-| keyring, mdns-sd, sysinfo, fs4, sha2, windows-sys           | MIT / Apache-2.0             | Yes                        |
-| serde, thiserror, url, log                                  | MIT / Apache-2.0             | Yes                        |
-| CPAL                                                        | Apache-2.0                   | Yes                        |
-| luna-voice helper (espeak-ng, piper-phonemize, sherpa-onnx) | GPL-3.0-or-later             | Yes, as a separate program |
-| sherpa-onnx (no-tts), ONNX Runtime, kaldi-native-fbank      | Apache-2.0 / MIT             | Yes                        |
-| whisper.cpp, ggml / whisper-rs                              | MIT / Unlicense              | Yes                        |
-| tar, bzip2 (libbz2-rs-sys)                                  | MIT / Apache-2.0             | Yes                        |
-| ts-rs, wiremock                                             | MIT / Apache-2.0             | No (tests only)            |
-| Qwen3 8B weights                                            | Apache-2.0                   | No, downloaded by the user |
-| Gemma 3 12B weights                                         | Gemma Terms of Use (not OSI) | No, downloaded by the user |
-| KWS zipformer, Silero VAD, Whisper small.en, Kokoro weights | Apache-2.0, MIT, MIT, Apache | No, downloaded by the user |
+| Component                                                   | Licence                         | Bundled                    |
+| ----------------------------------------------------------- | ------------------------------- | -------------------------- |
+| Tauri, plugins (autostart, log, single-instance)            | Apache-2.0 / MIT                | Yes                        |
+| React, Vite, TypeScript                                     | MIT / Apache-2.0                | Yes (React)                |
+| llama.cpp (`llama-server`, ggml)                            | MIT                             | Yes                        |
+| rusqlite, SQLite                                            | MIT, public domain              | Yes                        |
+| tokio, tokio-util, futures-util, reqwest, tokio-tungstenite | MIT / Apache-2.0                | Yes                        |
+| rustls, ring, rustls-platform-verifier                      | Apache-2.0 / MIT / ISC          | Yes                        |
+| keyring, mdns-sd, sysinfo, fs4, sha2, windows-sys           | MIT / Apache-2.0                | Yes                        |
+| serde, thiserror, url, log                                  | MIT / Apache-2.0                | Yes                        |
+| CPAL                                                        | Apache-2.0                      | Yes                        |
+| luna-voice helper (espeak-ng, piper-phonemize, sherpa-onnx) | GPL-3.0-or-later                | Yes, as a separate program |
+| sherpa-onnx (no-tts), ONNX Runtime, kaldi-native-fbank      | Apache-2.0 / MIT                | Yes                        |
+| tar, bzip2 (libbz2-rs-sys)                                  | MIT / Apache-2.0                | Yes                        |
+| ts-rs, wiremock                                             | MIT / Apache-2.0                | No (tests only)            |
+| Qwen3 8B weights                                            | Apache-2.0                      | No, downloaded by the user |
+| Gemma 3 12B weights                                         | Gemma Terms of Use (not OSI)    | No, downloaded by the user |
+| KWS zipformer, Silero VAD, Kokoro weights                   | Apache-2.0, MIT, Apache         | No, downloaded by the user |
+| Parakeet TDT 0.6B v2 weights                                | CC-BY-4.0 (attribution: NVIDIA) | No, downloaded by the user |

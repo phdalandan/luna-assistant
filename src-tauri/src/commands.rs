@@ -115,6 +115,11 @@ impl AppState {
         self.session.pending_confirmation()
     }
 
+    /// Whether Luna just offered to do something, so a bare "yes" is meant for her.
+    pub fn has_offer(&self) -> bool {
+        self.session.memory().offer.is_some()
+    }
+
     pub fn cancel_request(&self) {
         self.session.cancel();
     }

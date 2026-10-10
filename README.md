@@ -50,7 +50,7 @@ Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tr
 
 ## Development
 
-Prerequisites: Node.js 22, Rust (stable), CMake, LLVM (libclang, for the whisper.cpp bindings), and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+Prerequisites: Node.js 22, Rust (stable), CMake, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
 ```sh
 npm ci

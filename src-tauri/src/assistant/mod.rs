@@ -25,7 +25,7 @@ use crate::inference::{
     Timings, ToolCall, Warmup,
 };
 use crate::models::CloudModel;
-pub use relevance::{Relevance, classify as relevance};
+pub use relevance::{Relevance, answer as yes_or_no, classify as relevance};
 pub use route::vocabulary;
 pub use session::{CONVERSATION_LIFETIME, Memory, Session};
 use session::{MAX_REFERENCED, Turn};
@@ -34,6 +34,19 @@ use tools::ToolRequest;
 const MAX_STEPS: usize = 4;
 const OUT_OF_SCOPE: &str = "I can only help with your home.";
 const HISTORY_TURNS: usize = 3;
+/// Replies are spoken, so a model reply never runs longer than this.
+const MAX_SENTENCES: usize = 2;
+/// Openings of sentences that narrate what the model is doing rather than answer.
+const NARRATION: &[&str] = &[
+    "i'll ",
+    "i will ",
+    "let me ",
+    "i need to ",
+    "i should ",
+    "i'm going to ",
+    "the request ",
+    "the user ",
+];
 
 const INSTRUCTIONS: &str = "You are Luna, the voice assistant for one Home Assistant home. \
 You help only with this home: its devices, sensors, rooms, and their states. \
@@ -59,7 +72,9 @@ Only when the user names an exception, use one control call with exclude_entitie
 - Luna asks the user to confirm unlocking and opening doors. Just call control.
 - Never state the time unless the request context gives it.
 - Never mention the request context, tools, or IDs.
-- Reply in one short sentence. Do not repeat the request. Never use em dashes.";
+- Reply casually in one or two short sentences, like \"Yep, it's on.\" or \"Nope, it's off. Want me to turn it on?\" \
+Never describe what you are doing or about to do, and never explain what you checked. If you did not catch the request, just ask \"Sorry, what was that?\" \
+Do not repeat the request. Never use em dashes.";
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum AssistantError {
@@ -581,10 +596,51 @@ fn final_text(content: &str, results: &[String]) -> String {
         .trim()
         .to_owned();
     match (text.is_empty(), results.is_empty()) {
-        (false, _) => text,
+        (false, _) => brief(&text),
         (true, false) => results.join(" "),
         (true, true) => "Sorry, I don't have an answer for that.".into(),
     }
+}
+
+/// Drops narration such as "I'll ask for clarification." and keeps at most two sentences.
+fn brief(text: &str) -> String {
+    let sentences = sentences(text);
+    let answers: Vec<&str> = sentences
+        .iter()
+        .copied()
+        .filter(|sentence| {
+            let lower = sentence.to_lowercase();
+            !NARRATION.iter().any(|opening| lower.starts_with(opening))
+        })
+        .collect();
+    let kept = if answers.is_empty() {
+        &sentences
+    } else {
+        &answers
+    };
+    kept[..kept.len().min(MAX_SENTENCES)].join(" ")
+}
+
+/// Splits after ".", "?", or "!" followed by a space, so "2.4G" and "26.5°" stay whole.
+fn sentences(text: &str) -> Vec<&str> {
+    let mut sentences = Vec::new();
+    let mut start = 0;
+    for (index, c) in text.char_indices() {
+        let end = index + c.len_utf8();
+        let next = text[end..].chars().next();
+        if matches!(c, '.' | '?' | '!') && next.is_none_or(char::is_whitespace) {
+            let sentence = text[start..end].trim();
+            if !sentence.is_empty() {
+                sentences.push(sentence);
+            }
+            start = end;
+        }
+    }
+    let rest = text[start..].trim();
+    if !rest.is_empty() {
+        sentences.push(rest);
+    }
+    sentences
 }
 
 fn strip_reasoning(content: &str) -> &str {

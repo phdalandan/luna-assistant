@@ -38,7 +38,7 @@ pub fn select<'a>(home: &'a Home, target: &Target) -> Result<Selection<'a>, Reso
     let mut selected: BTreeMap<&str, Selected<'a>> = BTreeMap::new();
     if has_location || !target.domains.is_empty() {
         for entity in home.entities.values() {
-            if !entity.internal
+            if !entity.internal()
                 && in_location(home, target, entity)
                 && matches_filters(target, entity)
             {

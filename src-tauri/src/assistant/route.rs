@@ -346,10 +346,13 @@ fn parse_sentence(sentence: &str) -> Option<Intent> {
         [value] | [value, "percent" | "degrees" | "degree"] if value.parse::<f64>().is_ok() => {
             setting(&words)
         }
-        ["is" | "are", rest @ .., last] => {
+        // Speech recognition often hears "Is the" as "It's the".
+        [first @ ("is" | "are" | "it's" | "its"), rest @ .., last]
+            if matches!(*first, "is" | "are") || rest.first() == Some(&"the") =>
+        {
             let asked = match *last {
-                "on" | "running" => Asked::Power(true),
-                "off" => Asked::Power(false),
+                "on" | "running" | "enabled" => Asked::Power(true),
+                "off" | "disabled" => Asked::Power(false),
                 "open" => Asked::Opening(true),
                 "closed" => Asked::Opening(false),
                 "locked" => Asked::Locking(true),
@@ -383,6 +386,10 @@ fn is_subject_only(words: &[&str]) -> bool {
 
 /// "It's on I think", "it is not off", "that's wrong": the user disputes what Luna reported.
 fn states_a_fact(words: &[&str]) -> bool {
+    // "It's the bedroom AC on" is "Is the bedroom AC on?" misheard: a question, not a statement.
+    if matches!(words, ["it's" | "its", "the", ..]) {
+        return false;
+    }
     words
         .first()
         .is_some_and(|word| STATEMENT_STARTS.contains(word))
@@ -545,7 +552,7 @@ pub fn vocabulary(home: &Home) -> String {
     let devices = home
         .entities
         .values()
-        .filter(|entity| !entity.internal && CONTROL_DOMAINS.contains(&entity.domain()))
+        .filter(|entity| !entity.internal() && CONTROL_DOMAINS.contains(&entity.domain()))
         .map(|entity| entity.name.as_str());
     let mut seen = HashSet::new();
     areas
@@ -595,12 +602,24 @@ fn resolve_named(home: &Home, words: &[String], domains: &[&str]) -> Resolution 
         .map(|word| stem(word))
         .filter(|word| !SOFT.contains(&word.as_str()) || names_anything(home, word))
         .collect();
-    let candidates: Vec<&Entity> = home
+    let matching =
+        |entity: &&Entity| !entity.hidden && fits(entity, domains) && covers(home, entity, &phrase);
+    let regular: Vec<&Entity> = home
         .entities
         .values()
-        .filter(|entity| !entity.internal && fits(entity, domains))
-        .filter(|entity| covers(home, entity, &phrase))
+        .filter(|entity| !entity.configuration)
+        .filter(matching)
         .collect();
+    // Configuration entities, like a router's "Guest WIFI 2.4G", count only when named.
+    let candidates: Vec<&Entity> = if regular.is_empty() {
+        home.entities
+            .values()
+            .filter(|entity| entity.configuration && names_every_word(entity, &phrase))
+            .filter(matching)
+            .collect()
+    } else {
+        regular
+    };
     // "The AC" is the climate device, not "AC Display light" or "AC Jet mode" switches.
     let kinds: Vec<&String> = phrase.iter().filter(|word| device_word(word)).collect();
     let of_kind: Vec<&Entity> = candidates
@@ -681,7 +700,7 @@ fn covers(home: &Home, entity: &Entity, phrase: &[String]) -> bool {
 pub(super) fn names_anything(home: &Home, word: &str) -> bool {
     home.entities
         .values()
-        .any(|entity| !entity.internal && name_words(entity).contains(word))
+        .any(|entity| !entity.hidden && name_words(entity).contains(word))
         || home
             .areas
             .iter()
@@ -703,6 +722,13 @@ fn names_match(entity: &Entity, phrase: &[String]) -> bool {
                 .collect::<HashSet<_>>()
                 == wanted
         })
+}
+
+/// Every word of the phrase that is not a kind of device is in the entity's own name.
+fn names_every_word(entity: &Entity, phrase: &[String]) -> bool {
+    let names = name_words(entity);
+    let mut wanted = phrase.iter().filter(|word| !device_word(word)).peekable();
+    wanted.peek().is_some() && wanted.all(|word| names.contains(word))
 }
 
 fn name_words(entity: &Entity) -> HashSet<String> {
@@ -750,6 +776,20 @@ fn words(text: &str) -> HashSet<String> {
     tokens(text).iter().map(|word| stem(word)).collect()
 }
 
+/// "Wi-Fi" and "wi fi" are written "WiFi" in device names.
+pub(super) fn join_compounds(words: Vec<String>) -> Vec<String> {
+    let mut joined: Vec<String> = Vec::with_capacity(words.len());
+    for word in words {
+        if word == "fi" && joined.last().is_some_and(|last| last == "wi") {
+            joined.pop();
+            joined.push("wifi".into());
+        } else {
+            joined.push(word);
+        }
+    }
+    joined
+}
+
 pub(super) fn stem(word: &str) -> String {
     word.strip_suffix('s')
         .filter(|stem| stem.len() >= 3 && !stem.ends_with('s'))
@@ -781,7 +821,7 @@ pub(super) fn tokens(text: &str) -> Vec<String> {
             }
         })
         .collect();
-    let mut words: Vec<String> = cleaned.split_whitespace().map(str::to_owned).collect();
+    let mut words = join_compounds(cleaned.split_whitespace().map(str::to_owned).collect());
     while words.len() > 1
         && words
             .first()
@@ -821,6 +861,50 @@ mod tests {
             Resolution::Exact(ids) => Some(ids),
             _ => None,
         }
+    }
+
+    fn router_home() -> Home {
+        let mut home = home();
+        home.apply_state(
+            "switch.guest_wifi_2_4g",
+            Some(state(
+                "switch.guest_wifi_2_4g",
+                "on",
+                json!({"friendly_name": "Guest WIFI 2.4G"}),
+            )),
+        );
+        home.register_configuration("switch.guest_wifi_2_4g");
+        home
+    }
+
+    #[test]
+    fn configuration_entities_are_found_by_their_own_name_only() {
+        let home = router_home();
+        assert_eq!(
+            resolve_text(&home, "Is the guest Wi-Fi on?"),
+            Some(vec!["switch.guest_wifi_2_4g".to_string()])
+        );
+        assert_eq!(
+            resolve_text(&home, "Turn off the guest wifi"),
+            Some(vec!["switch.guest_wifi_2_4g".to_string()])
+        );
+        let switches = resolve(
+            &home,
+            &Memory::default(),
+            &named(&["switches"]),
+            &["switch"],
+        );
+        let found = match switches {
+            Resolution::Exact(ids) | Resolution::Choices(ids) => ids,
+            Resolution::Unknown => Vec::new(),
+        };
+        assert!(!found.contains(&"switch.guest_wifi_2_4g".to_string()));
+    }
+
+    #[test]
+    fn wi_fi_is_one_word() {
+        assert_eq!(tokens("the guest Wi-Fi"), ["the", "guest", "wifi"]);
+        assert_eq!(tokens("wi fi password"), ["wifi", "password"]);
     }
 
     fn porch_home() -> Home {
@@ -868,6 +952,13 @@ mod tests {
         assert_eq!(parse("oh wait. revert that"), Some(Intent::Undo));
         assert_eq!(parse("The porch is dark. Turn on the light."), None);
         assert_eq!(parse("Are you sure?"), Some(Intent::Recheck));
+        assert_eq!(
+            parse("It's the Bedroom AC on"),
+            Some(Intent::Query {
+                asked: Asked::Power(true),
+                subject: named(&["bedroom", "ac"]),
+            })
+        );
         for statement in [
             "It is on I thinkn",
             "It is not off.",

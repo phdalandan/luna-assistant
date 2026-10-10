@@ -1,6 +1,6 @@
 //! Handles recognised requests without the language model, and shared execution helpers.
 use super::route::{self, Asked, Intent, Resolution, Subject};
-use super::session::{Choice, Memory, Pending, Turn};
+use super::session::{Choice, Memory, Offer, Pending, Turn};
 use super::{Home, Metrics, Reply, clock, phrasing};
 use crate::actions::{
     self, Action, ControlRequest, ExecutionReport, Plan, Target, ValidationError,
@@ -17,6 +17,17 @@ pub async fn handle<A: HomeApi>(
     request: &str,
 ) -> Option<Reply> {
     let previous = memory.last_request.take();
+    if let Some(offer) = memory.offer.take() {
+        match super::relevance::answer(request) {
+            Some(true) if !home.connected => return Some(Reply::direct(NOT_CONNECTED)),
+            Some(true) => {
+                let pending = Pending::Control(offer.action);
+                return perform(home, memory, pending, None, offer.ids).await;
+            }
+            Some(false) => return Some(Reply::direct("Okay.")),
+            None => {}
+        }
+    }
     if let Some(choice) = memory.choice.take() {
         let picked = route::pick(&home.cache.read(), &choice.ids, request);
         if let Some(ids) = picked {
@@ -50,13 +61,31 @@ pub async fn handle<A: HomeApi>(
         let snapshot = home.cache.read();
         match route::resolve(&snapshot, memory, &subject, &domains) {
             Resolution::Exact(ids) => ids,
-            Resolution::Choices(ids) => {
-                return Some(ask_which(&snapshot, memory, ids, pending));
-            }
+            // Reading a few devices is harmless, so a question answers for each of them.
+            Resolution::Choices(ids) if matches!(pending, Pending::Query(_)) => ids,
+            Resolution::Choices(ids) => match just_mentioned(memory, &ids) {
+                Some(id) => vec![id],
+                None => return Some(ask_which(&snapshot, memory, ids, pending)),
+            },
             Resolution::Unknown => return None,
         }
     };
     perform(home, memory, pending, asked, ids).await
+}
+
+/// The one choice the conversation was just about, so after "is the guest Wi-Fi on?",
+/// "turn on the 5G" means the guest network's 5G rather than another 5G switch.
+fn just_mentioned(memory: &Memory, ids: &[String]) -> Option<String> {
+    let mut mentioned = ids.iter().filter(|id| {
+        memory
+            .referenced
+            .iter()
+            .any(|reference| &reference.id == *id)
+    });
+    match (mentioned.next(), mentioned.next()) {
+        (Some(id), None) => Some(id.clone()),
+        _ => None,
+    }
 }
 
 /// Carries out a recognised request on resolved entities. `asked` is set for direct questions,
@@ -81,6 +110,21 @@ async fn perform<A: HomeApi>(
                         turn.refer(&entity.id, phrase);
                     }
                     answer
+                }
+                (Some(Asked::Power(on)), [_, _, ..]) => {
+                    let variant = memory.next_variant();
+                    phrasing::power_of_several(&entities, on, variant).map(|answer| {
+                        for entity in &entities {
+                            turn.refer(&entity.id, state_phrase(entity));
+                        }
+                        if !answer.offer.is_empty() {
+                            memory.offer = Some(Offer {
+                                action: if on { Action::TurnOn } else { Action::TurnOff },
+                                ids: answer.offer,
+                            });
+                        }
+                        answer.text
+                    })
                 }
                 _ => None,
             };

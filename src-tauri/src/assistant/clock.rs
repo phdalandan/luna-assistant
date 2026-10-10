@@ -48,7 +48,7 @@ fn is_clock(entity: &Entity) -> bool {
         .split(|c: char| !c.is_alphanumeric())
         .any(|word| word == "time" || word == "clock");
     entity.domain() == "sensor"
-        && !entity.internal
+        && !entity.internal()
         && entity.device_class() != Some("timestamp")
         && named
         && !words.contains("utc")

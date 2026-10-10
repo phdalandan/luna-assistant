@@ -21,6 +21,7 @@ use crate::voice::SpeechFiles;
 /// The progress event id for the voice download.
 const VOICE_DOWNLOAD_ID: &str = "voice";
 const WAKE_WORD_DIR: &str = "wake-word";
+const TRANSCRIPTION_DIR: &str = "transcription";
 const SPEECH_OUTPUT_DIR: &str = "speech-output";
 /// Records which verified archive a folder was extracted from; the archive is then deleted.
 const EXTRACTED_MARKER: &str = "extracted";
@@ -81,21 +82,25 @@ impl VoiceModels {
     }
 
     /// Files used as downloaded, as opposed to archives that are extracted.
-    fn plain_files(&self) -> [&DownloadFile; 2] {
-        [
-            &self.speech.speech_detection.file,
-            &self.speech.transcription.file,
-        ]
+    fn plain_files(&self) -> [&DownloadFile; 1] {
+        [&self.speech.speech_detection.file]
     }
 
-    fn unpacks(&self) -> [Unpack<'_>; 2] {
+    fn unpacks(&self) -> [Unpack<'_>; 3] {
         let wake_word = &self.speech.wake_word;
+        let transcription = &self.speech.transcription;
         let output = &self.speech.speech_output;
         [
             Unpack {
                 archive: &wake_word.archive,
                 dir: self.store.dir().join(WAKE_WORD_DIR),
                 files: wake_word.extracted_files().to_vec(),
+                dirs: Vec::new(),
+            },
+            Unpack {
+                archive: &transcription.archive,
+                dir: self.store.dir().join(TRANSCRIPTION_DIR),
+                files: transcription.extracted_files().to_vec(),
                 dirs: Vec::new(),
             },
             Unpack {
@@ -126,12 +131,14 @@ impl VoiceModels {
             .plain_files()
             .iter()
             .all(|file| self.store.is_installed(*file));
-        let [wake_word, speech_output] = self.unpacks();
-        let unpacked = Self::is_unpacked(&wake_word) && Self::is_unpacked(&speech_output);
+        let [wake_word, transcription, speech_output] = self.unpacks();
+        let unpacked = [&wake_word, &transcription, &speech_output]
+            .into_iter()
+            .all(Self::is_unpacked);
         (verified && unpacked).then(|| SpeechFiles {
             wake_word_dir: wake_word.dir,
             speech_detection: self.store.model_path(&self.speech.speech_detection.file),
-            transcription: self.store.model_path(&self.speech.transcription.file),
+            transcription: transcription.dir,
             speech_output_dir: speech_output.dir,
         })
     }

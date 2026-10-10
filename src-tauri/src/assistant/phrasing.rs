@@ -162,6 +162,93 @@ pub fn yes_or_no(entity: &Entity, asked: Asked, phrase: &str, variant: usize) ->
     Some(format!("{answer}, it's {phrase}."))
 }
 
+/// A reply about several devices, and the ones Luna offers to switch.
+pub struct GroupAnswer {
+    pub text: String,
+    pub offer: Vec<String>,
+}
+
+/// "Yep, but only the 2.4G. Want me to turn on the 5G too?" for "is the guest Wi-Fi on?" about
+/// several devices. Unavailable ones are left out; `None` when none is available.
+pub fn power_of_several(entities: &[&Entity], on: bool, variant: usize) -> Option<GroupAnswer> {
+    let names = short_names(entities);
+    let available: Vec<(&Entity, &str)> = entities
+        .iter()
+        .zip(&names)
+        .filter(|(entity, _)| entity.is_available())
+        .map(|(entity, name)| (*entity, name.as_str()))
+        .collect();
+    if available.is_empty() {
+        return None;
+    }
+    let (matching, others): (Vec<_>, Vec<_>) = available
+        .iter()
+        .partition(|(entity, _)| !matches!(entity.state.as_str(), "off" | "standby") == on);
+    let matching: Vec<&str> = matching.iter().map(|(_, name)| *name).collect();
+    let other_names: Vec<&str> = others.iter().map(|(_, name)| *name).collect();
+    let (state, opposite) = if on { ("on", "off") } else { ("off", "on") };
+    let yes = pick(&["Yes", "Yep"], variant);
+    let no = pick(&["Nope", "No"], variant);
+    let text = match (matching.len(), other_names.len()) {
+        (_, 0) => format!("{yes}, {} {state}.", all_of(&matching)),
+        (0, 1) => format!(
+            "{no}, {} {opposite}. Want me to turn it {state}?",
+            all_of(&other_names)
+        ),
+        (0, _) => format!(
+            "{no}, {} {opposite}. Want me to turn them {state}?",
+            all_of(&other_names)
+        ),
+        _ => format!(
+            "{yes}, but only the {}. Want me to turn {state} the {} too?",
+            list(&matching),
+            list(&other_names)
+        ),
+    };
+    Some(GroupAnswer {
+        text,
+        offer: others.iter().map(|(entity, _)| entity.id.clone()).collect(),
+    })
+}
+
+/// "the 2.4G is", "both are", "all three are".
+fn all_of(names: &[&str]) -> String {
+    match names {
+        [name] => format!("the {name} is"),
+        [_, _] => "both are".into(),
+        [_, _, _] => "all three are".into(),
+        [_, _, _, _] => "all four are".into(),
+        _ => format!("all {} are", names.len()),
+    }
+}
+
+/// "2.4G", "2.4G and 5G", "2.4G, 5G, and 6G".
+fn list(names: &[&str]) -> String {
+    match names {
+        [] => String::new(),
+        [one] => (*one).to_owned(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
+}
+
+/// Names without the words they all start with, so "TP-Link Router Guest WIFI 2.4G" and
+/// "TP-Link Router Guest WIFI 5G" become "2.4G" and "5G".
+fn short_names(entities: &[&Entity]) -> Vec<String> {
+    let words: Vec<Vec<&str>> = entities
+        .iter()
+        .map(|entity| entity.name.split_whitespace().collect())
+        .collect();
+    let shortest = words.iter().map(Vec::len).min().unwrap_or(0);
+    let shared = (0..shortest)
+        .take_while(|&index| words.iter().all(|name| name[index] == words[0][index]))
+        .count();
+    if entities.len() < 2 || shared == 0 || shared == shortest {
+        return entities.iter().map(|entity| entity.name.clone()).collect();
+    }
+    words.iter().map(|name| name[shared..].join(" ")).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -248,6 +335,44 @@ mod tests {
 
         let warmer = report(Action::SetTemperature, Some(26.0), &[Outcome::Done]);
         assert_eq!(acknowledge(&[warmer], true, 0), "Set to 26\u{b0}.");
+    }
+
+    fn router(states: &[(&str, &str)]) -> crate::home_assistant::model::Home {
+        let mut home = home();
+        for (band, value) in states {
+            let id = format!("switch.guest_wifi_{band}");
+            let name = format!("TP-Link Router Guest WIFI {}", band.to_uppercase());
+            home.apply_state(&id, Some(state(&id, value, json!({"friendly_name": name}))));
+        }
+        home
+    }
+
+    fn ask_power(states: &[(&str, &str)], on: bool) -> (String, Vec<String>) {
+        let home = router(states);
+        let entities: Vec<&Entity> = states
+            .iter()
+            .map(|(band, _)| home.entity(&format!("switch.guest_wifi_{band}")).unwrap())
+            .collect();
+        let answer = power_of_several(&entities, on, 0).unwrap();
+        (answer.text, answer.offer)
+    }
+
+    #[test]
+    fn questions_about_several_devices_answer_casually_and_offer_the_rest() {
+        let (text, offer) = ask_power(&[("2g", "on"), ("5g", "off"), ("6g", "unavailable")], true);
+        assert_eq!(text, "Yes, but only the 2G. Want me to turn on the 5G too?");
+        assert_eq!(offer, ["switch.guest_wifi_5g"]);
+
+        let (text, offer) = ask_power(&[("2g", "on"), ("5g", "on")], true);
+        assert_eq!(text, "Yes, both are on.");
+        assert!(offer.is_empty());
+
+        let (text, offer) = ask_power(&[("2g", "off"), ("5g", "off")], true);
+        assert_eq!(text, "Nope, both are off. Want me to turn them on?");
+        assert_eq!(offer.len(), 2);
+
+        let (text, _) = ask_power(&[("2g", "off"), ("6g", "unavailable")], true);
+        assert_eq!(text, "Nope, the 2G is off. Want me to turn it on?");
     }
 
     #[test]

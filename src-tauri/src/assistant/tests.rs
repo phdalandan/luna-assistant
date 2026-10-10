@@ -811,6 +811,26 @@ fn history_never_includes_result_lines() {
 }
 
 #[test]
+fn model_replies_drop_narration_and_keep_two_sentences() {
+    assert_eq!(
+        final_text(
+            "The request is cut off and doesn't clearly ask about the home. I'll ask for \
+             clarification. Could you finish your question? I'm not sure what you're asking about.",
+            &[]
+        ),
+        "Could you finish your question? I'm not sure what you're asking about."
+    );
+    assert_eq!(
+        final_text(
+            "Yep, the 2.4G is on. The 5G is off. The 6G is unavailable.",
+            &[]
+        ),
+        "Yep, the 2.4G is on. The 5G is off."
+    );
+    assert_eq!(final_text("It's 26.5° inside", &[]), "It's 26.5° inside");
+}
+
+#[test]
 fn final_text_removes_reasoning_and_em_dashes() {
     assert_eq!(
         final_text("<think>hmm</think> It's 20° \u{2014} warm.", &[]),
@@ -1449,17 +1469,39 @@ async fn answers_to_which_one_finish_the_original_request_without_the_model() {
         json!({"friendly_name": "Back Porch"}),
     );
     let model = ScriptedModel::unused();
-    conversation.ask(&model, "Is the porch light on?").await;
-    assert_eq!(
-        conversation.ask(&model, "the first one").await.text,
-        "Back Porch is off."
-    );
-    assert_eq!(conversation.state("light.back_porch"), "off");
+    let asked = conversation.ask(&model, "Turn on the porch light").await;
+    assert!(asked.text.starts_with("Which one"), "{}", asked.text);
+    conversation.ask(&model, "the first one").await;
+    assert_eq!(conversation.state("light.back_porch"), "on");
 
+    let conversation = Conversation::new();
+    conversation.set(
+        "light.back_porch",
+        "off",
+        json!({"friendly_name": "Back Porch"}),
+    );
     conversation.ask(&model, "Turn on the porch light").await;
     conversation.ask(&model, "front").await;
     assert_eq!(conversation.state("light.front_porch"), "on");
     assert_eq!(conversation.state("light.back_porch"), "off");
+}
+
+#[tokio::test]
+async fn questions_about_a_few_devices_answer_for_each() {
+    let conversation = Conversation::new();
+    conversation.set(
+        "light.back_porch",
+        "on",
+        json!({"friendly_name": "Back Porch"}),
+    );
+    let reply = conversation
+        .ask(&ScriptedModel::unused(), "Is the porch light on?")
+        .await;
+    assert!(
+        reply.text.contains("Back Porch") && reply.text.contains("Front Porch"),
+        "{}",
+        reply.text
+    );
 }
 
 #[tokio::test]
@@ -1518,6 +1560,7 @@ async fn everyday_requests_are_answered_without_the_model() {
         "is the garage door closed?",
         "is the front door locked",
         "is the porch light on?",
+        "it's the porch light on",
         "are the kitchen lights on",
         "is the tv on",
         "check the garage",
@@ -1564,7 +1607,7 @@ async fn everyday_requests_are_answered_without_the_model() {
         &["turn on the porch light", "front porch"],
         &["turn on the porch light", "first one"],
         &["turn on the porch light", "both"],
-        &["is the porch light on", "the second one"],
+        &["turn on the porch light", "the second one"],
     ];
 
     let mut cases: Vec<(bool, Vec<&str>)> = single.iter().map(|r| (false, vec![*r])).collect();
@@ -1600,6 +1643,72 @@ async fn everyday_requests_are_answered_without_the_model() {
         "sent to the model:\n{}",
         failures.join("\n")
     );
+}
+
+/// A router's Wi-Fi switches, which Home Assistant marks as configuration entities.
+fn add_router(conversation: &Conversation) {
+    for (id, name, value) in [
+        ("switch.guest_wifi_2_4g", "Guest WIFI 2.4G", "on"),
+        ("switch.guest_wifi_5g", "Guest WIFI 5G", "off"),
+        ("switch.iot_wifi_5g", "IoT WIFI 5G", "off"),
+    ] {
+        conversation.set(id, value, json!({"friendly_name": name}));
+        conversation
+            .cache
+            .update(|home| home.register_configuration(id));
+    }
+}
+
+#[tokio::test]
+async fn router_wifi_is_read_and_switched_without_the_model() {
+    let conversation = Conversation::new();
+    add_router(&conversation);
+    let model = ScriptedModel::unused();
+
+    let answer = conversation
+        .ask(&model, "It's the guest wifi enabled")
+        .await;
+    let switched = conversation.ask(&model, "Can you turn on the 5G").await;
+
+    assert_eq!(model.passes(), 0);
+    assert_eq!(answer.metrics.route, Route::Direct);
+    assert_eq!(
+        answer.text,
+        "Yes, but only the 2.4G. Want me to turn on the 5G too?"
+    );
+    assert_eq!(switched.metrics.route, Route::Direct);
+    assert_eq!(conversation.state("switch.guest_wifi_5g"), "on");
+    assert_eq!(conversation.state("switch.iot_wifi_5g"), "off");
+}
+
+#[tokio::test]
+async fn yes_accepts_luna_s_offer_and_anything_else_drops_it() {
+    let conversation = Conversation::new();
+    add_router(&conversation);
+    let model = ScriptedModel::unused();
+
+    conversation.ask(&model, "Is the guest wifi on?").await;
+    let accepted = conversation.ask(&model, "Yes please").await;
+    assert_eq!(accepted.metrics.route, Route::Direct);
+    assert_eq!(conversation.state("switch.guest_wifi_5g"), "on");
+    assert_eq!(conversation.state("switch.iot_wifi_5g"), "off");
+
+    conversation.ask(&model, "Turn off the guest wifi 5G").await;
+    conversation.ask(&model, "Is the guest wifi on?").await;
+    assert_eq!(conversation.ask(&model, "No").await.text, "Okay.");
+    assert_eq!(conversation.state("switch.guest_wifi_5g"), "off");
+    assert!(conversation.memory().offer.is_none());
+}
+
+#[tokio::test]
+async fn a_name_that_fits_several_devices_still_asks_without_context() {
+    let conversation = Conversation::new();
+    add_router(&conversation);
+    let reply = conversation
+        .ask(&ScriptedModel::unused(), "Turn on the 5G")
+        .await;
+    assert!(reply.text.starts_with("Which one"), "{}", reply.text);
+    assert_eq!(conversation.state("switch.guest_wifi_5g"), "off");
 }
 
 #[tokio::test]

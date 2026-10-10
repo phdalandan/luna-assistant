@@ -90,6 +90,7 @@ pub trait Host: Send + Sync + 'static {
 pub struct SpeechFiles {
     pub wake_word_dir: PathBuf,
     pub speech_detection: PathBuf,
+    /// The folder with the speech recognition model files.
     pub transcription: PathBuf,
     pub speech_output_dir: PathBuf,
 }

@@ -33,46 +33,6 @@ impl Default for VoiceStatus {
     }
 }
 
-const AFFIRMATIVE: &[&str] = &[
-    "yes",
-    "yeah",
-    "yep",
-    "sure",
-    "do it",
-    "go ahead",
-    "confirm",
-    "ok",
-    "okay",
-    "please do",
-];
-const NEGATIVE: &[&str] = &[
-    "no",
-    "nope",
-    "cancel",
-    "don't",
-    "dont",
-    "stop",
-    "never mind",
-];
-
-/// "Yes" or "no" in answer to a confirmation question.
-fn confirmation_answer(text: &str) -> Option<bool> {
-    let words: String = text
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '\'')
-        .collect();
-    let phrase = words.split_whitespace().collect::<Vec<_>>().join(" ");
-    let phrase = phrase.trim_end_matches(" please");
-    if AFFIRMATIVE.contains(&phrase) {
-        Some(true)
-    } else if NEGATIVE.contains(&phrase) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
 struct VoiceHost {
     app: AppHandle,
 }
@@ -82,7 +42,7 @@ impl Host for VoiceHost {
         let state = self.app.state::<AppState>();
         let pending = state.pending_confirmation();
         let result = tauri::async_runtime::block_on(async {
-            match pending.zip(confirmation_answer(request)) {
+            match pending.zip(assistant::yes_or_no(request)) {
                 Some((id, confirmed)) => state.confirm(&self.app, id, confirmed).await,
                 None => state.ask(&self.app, request).await,
             }
@@ -99,7 +59,8 @@ impl Host for VoiceHost {
 
     fn relevance(&self, text: &str) -> Relevance {
         let state = self.app.state::<AppState>();
-        if state.pending_confirmation().is_some() && confirmation_answer(text).is_some() {
+        let awaiting_answer = state.pending_confirmation().is_some() || state.has_offer();
+        if awaiting_answer && assistant::yes_or_no(text).is_some() {
             return Relevance::Request;
         }
         assistant::relevance(&state.home_assistant.cache().read(), text)
@@ -269,19 +230,4 @@ fn permission_message() -> &'static str {
 #[cfg(not(target_os = "macos"))]
 fn permission_message() -> &'static str {
     "Luna can't use the microphone. Allow desktop apps to use it in Settings > Privacy & security > Microphone."
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn confirmations_are_answered_by_voice() {
-        assert_eq!(confirmation_answer("Yes."), Some(true));
-        assert_eq!(confirmation_answer("Yeah, go ahead"), None);
-        assert_eq!(confirmation_answer("Go ahead, please."), Some(true));
-        assert_eq!(confirmation_answer("No."), Some(false));
-        assert_eq!(confirmation_answer("Don't."), Some(false));
-        assert_eq!(confirmation_answer("Turn off the lights."), None);
-    }
 }

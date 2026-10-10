@@ -1,8 +1,10 @@
 //! The voice thread: spots the wake word while passive and drives the conversation when Luna is
 //! addressed. Audio stays in memory only for as long as the current state needs it.
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
+use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use sherpa_onnx::LinearResampler;
@@ -19,7 +21,7 @@ use super::{
 };
 use crate::assistant::Relevance;
 use crate::models::catalog;
-use crate::models::speech::Voice;
+use crate::models::speech::{TranscriptionModel, Voice};
 
 /// Speech separated by a longer pause than this belongs to a different utterance.
 const UTTERANCE_GAP: usize = SAMPLE_RATE as usize;
@@ -35,9 +37,45 @@ const LOUD: f32 = 0.1;
 
 /// Turns a request's audio into text.
 enum Recognizer {
-    Local(Transcriber),
+    Local(LocalRecognizer),
     /// The host sends the audio to the cloud provider the user chose.
     Cloud,
+}
+
+/// The local model takes seconds to load, so it loads on its own thread while the user speaks;
+/// meanwhile the voice thread keeps reading the microphone, so no audio is dropped.
+struct LocalRecognizer {
+    loading: Option<JoinHandle<Result<Transcriber, VoiceError>>>,
+    ready: Option<Transcriber>,
+}
+
+impl LocalRecognizer {
+    fn start(dir: PathBuf, model: &'static TranscriptionModel) -> Result<Self, VoiceError> {
+        let loading = std::thread::Builder::new()
+            .name("luna-transcription".into())
+            .spawn(move || Transcriber::load(&dir, model))
+            .map_err(|error| {
+                log::error!("could not start loading the transcription model: {error}");
+                VoiceError::ModelLoad("transcription")
+            })?;
+        Ok(Self {
+            loading: Some(loading),
+            ready: None,
+        })
+    }
+
+    /// Waits for the model if it is still loading.
+    fn transcriber(&mut self) -> Result<&Transcriber, VoiceError> {
+        if let Some(loading) = self.loading.take() {
+            let loaded = loading
+                .join()
+                .unwrap_or(Err(VoiceError::ModelLoad("transcription")))?;
+            self.ready = Some(loaded);
+        }
+        self.ready
+            .as_ref()
+            .ok_or(VoiceError::ModelLoad("transcription"))
+    }
 }
 
 /// Models that only exist while Luna is being spoken to.
@@ -219,16 +257,7 @@ impl Listener {
 
     fn load_conversation_models(&self) -> Result<Active, VoiceError> {
         let speech = catalog::speech();
-        let detector =
-            SpeechDetector::load(&self.files.speech_detection, &speech.speech_detection)?;
-        let recognizer = if self.settings.cloud_transcription {
-            Recognizer::Cloud
-        } else {
-            let mut transcriber =
-                Transcriber::load(&self.files.transcription, &speech.transcription)?;
-            transcriber.expect_words(&self.host.vocabulary())?;
-            Recognizer::Local(transcriber)
-        };
+        // The voice takes longest to load, so it starts first and loads alongside the rest.
         let sender = self.sender.clone();
         let speaker = Speaker::new(
             &self.settings.helper,
@@ -239,6 +268,16 @@ impl Listener {
                 let _ = sender.try_send(Input::SpeechFinished);
             },
         )?;
+        let detector =
+            SpeechDetector::load(&self.files.speech_detection, &speech.speech_detection)?;
+        let recognizer = if self.settings.cloud_transcription {
+            Recognizer::Cloud
+        } else {
+            Recognizer::Local(LocalRecognizer::start(
+                self.files.transcription.clone(),
+                &speech.transcription,
+            )?)
+        };
         Ok(Active {
             detector,
             recognizer,
@@ -301,7 +340,14 @@ impl Listener {
         let audio = utterance(std::mem::take(&mut active.segments));
         let text = match &mut active.recognizer {
             _ if audio.is_empty() => Ok(String::new()),
-            Recognizer::Local(transcriber) => transcriber.transcribe(&audio).map_err(|_| None),
+            Recognizer::Local(local) => match local.transcriber() {
+                Ok(transcriber) => transcriber.transcribe(&audio).map_err(|_| None),
+                Err(error) => {
+                    self.host.stopped(error);
+                    self.stopping = true;
+                    return;
+                }
+            },
             Recognizer::Cloud => self
                 .host
                 .transcribe(&audio)

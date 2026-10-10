@@ -24,8 +24,17 @@ pub struct Memory {
     pub last_request: Option<Pending>,
     /// The request waiting on "Which one?", with the choices in the order they were offered.
     pub choice: Option<Choice>,
+    /// What Luna just offered to do, such as "Want me to turn on the 5G too?".
+    pub offer: Option<Offer>,
     /// Rotates reply wording so the same acknowledgement is not repeated every time.
     pub variant: usize,
+}
+
+/// Carried out when the user says yes, through the same validation as any request.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Offer {
+    pub action: Action,
+    pub ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]

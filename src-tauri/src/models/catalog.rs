@@ -212,6 +212,16 @@ fn parse(json: &str) -> Result<Catalog, CatalogError> {
             wake_word.archive.file_name.clone(),
         ));
     }
+    let transcription = &catalog.speech.transcription;
+    if !transcription
+        .extracted_files()
+        .into_iter()
+        .all(safe_file_name)
+    {
+        return Err(CatalogError::InvalidFileName(
+            transcription.archive.file_name.clone(),
+        ));
+    }
     let output = &catalog.speech.speech_output;
     let mut voice_ids = HashSet::new();
     let safe_output = output.extracted_files().into_iter().all(safe_file_name)

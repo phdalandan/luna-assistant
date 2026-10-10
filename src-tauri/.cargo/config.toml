@@ -1,18 +1,5 @@
 [env]
 TS_RS_EXPORT_DIR = { value = "../src/bindings", relative = true }
-# whisper.cpp: portable code for AVX2 processors, like the bundled llama-server. Ignored on ARM.
-GGML_NATIVE = "OFF"
-GGML_AVX = "ON"
-GGML_AVX2 = "ON"
-GGML_FMA = "ON"
-GGML_F16C = "ON"
-# The cmake crate drops optimisation from these flags with the Visual Studio generator.
-# Both options are valid for MSVC and clang.
-CMAKE_C_FLAGS_RELEASE = "-O2 -DNDEBUG"
-CMAKE_CXX_FLAGS_RELEASE = "-O2 -DNDEBUG"
-# Debug builds of Luna use RelWithDebInfo for whisper.cpp, which has the same problem.
-CMAKE_C_FLAGS_RELWITHDEBINFO = "-O2 -DNDEBUG"
-CMAKE_CXX_FLAGS_RELWITHDEBINFO = "-O2 -DNDEBUG"
 
 # Links the verified "no-tts" sherpa-onnx libraries from `npm run runtime` (no GPL espeak-ng)
 # instead of running sherpa-onnx-sys's build script, which downloads unverified archives.

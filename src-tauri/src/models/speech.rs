@@ -46,7 +46,7 @@ impl SpeechCatalog {
         [
             &self.wake_word.archive,
             &self.speech_detection.file,
-            &self.transcription.file,
+            &self.transcription.archive,
             &self.speech_output.archive,
         ]
     }
@@ -92,12 +92,24 @@ pub struct VadModel {
     pub window_size: i32,
 }
 
+/// Offline speech recognition, shipped as an archive the model files are extracted from.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TranscriptionModel {
-    pub file: DownloadFile,
+    pub archive: DownloadFile,
     pub license: String,
-    pub language: String,
+    pub encoder: String,
+    pub decoder: String,
+    pub joiner: String,
+    pub tokens: String,
+    /// The sherpa-onnx model type, such as `nemo_transducer`.
+    pub model_type: String,
+}
+
+impl TranscriptionModel {
+    pub fn extracted_files(&self) -> [&str; 4] {
+        [&self.encoder, &self.decoder, &self.joiner, &self.tokens]
+    }
 }
 
 /// Kokoro speech synthesis, run by the separate GPL voice helper. The archive's English files and

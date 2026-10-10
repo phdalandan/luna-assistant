@@ -3,33 +3,57 @@ import { events, type VoiceState } from "../lib/api";
 import { useEvent } from "../lib/hooks";
 
 const SIZE = 160;
-const SPACING = 5;
-/** Ripples around the outline: how many, how far they reach, and how fast they travel. */
-const RIPPLES = [
-  { count: 3, reach: 0.05, speed: 0.7 },
-  { count: 5, reach: 0.04, speed: -1.1 },
-  { count: 7, reach: 0.03, speed: 1.6 },
+const CENTER = SIZE / 2;
+/** The circle; ripples spread from it to the edge of the canvas. */
+const RADIUS = 50;
+
+/** Waves across the circle: shape, starting offset, flow speed, and relative strength. */
+const WAVES = [
+  { frequency: 1.5, phase: 0, speed: 0.9, strength: 1 },
+  { frequency: 2.2, phase: 2.1, speed: -1.2, strength: 0.7 },
+  { frequency: 3, phase: 4.2, speed: 1.6, strength: 0.45 },
 ];
 
-/** Colour token, flow speed, and how strongly sound reshapes the outline, for each state. */
-const LOOKS: Record<VoiceState, { color: string; speed: number }> = {
-  off: { color: "--orb-idle", speed: 0 },
-  listening: { color: "--orb-listening", speed: 0.4 },
-  processing: { color: "--accent", speed: 0.9 },
-  responding: { color: "--orb-speaking", speed: 1 },
+interface Layers {
+  waves: number;
+  dots: number;
+  ripples: number;
+}
+
+/** How visible each layer is in each state. Layers fade between states. */
+const TARGETS: Record<VoiceState, Layers> = {
+  off: { waves: 1, dots: 0, ripples: 0 },
+  listening: { waves: 1, dots: 0, ripples: 0 },
+  processing: { waves: 0, dots: 1, ripples: 0 },
+  responding: { waves: 1, dots: 0, ripples: 1 },
 };
 
-/** A halftone blob whose outline peaks with the microphone while listening and with Luna's voice
- * while replying. Only loudness reaches the window, never audio. */
+const COLORS: Record<VoiceState, string> = {
+  off: "--orb-idle",
+  listening: "--orb-listening",
+  processing: "--accent",
+  responding: "--orb-speaking",
+};
+
+/** A circle of flowing waves that peak with the microphone while listening, three orbiting dots
+ * while thinking, and ripples while Luna speaks. Only loudness reaches the window, never audio. */
 export function VoiceOrb({ state }: { state: VoiceState }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const level = useRef(0);
+  const current = useRef(state);
+  const wake = useRef<() => void>(() => {});
 
   useEvent(() =>
     events.onVoiceLevel((value) => {
       level.current = Math.max(level.current, value);
+      wake.current();
     }),
   );
+
+  useEffect(() => {
+    current.current = state;
+    wake.current();
+  }, [state]);
 
   useEffect(() => {
     const element = canvas.current;
@@ -39,30 +63,64 @@ export function VoiceOrb({ state }: { state: VoiceState }) {
     element.width = SIZE * ratio;
     element.height = SIZE * ratio;
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const styles = getComputedStyle(element);
+    const color = (state: VoiceState) =>
+      styles.getPropertyValue(COLORS[state]).trim();
+    const reduced =
+      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
 
-    const look = LOOKS[state];
-    context.fillStyle = getComputedStyle(element)
-      .getPropertyValue(look.color)
-      .trim();
-    const still =
-      look.speed === 0 ||
-      window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    const layers: Layers = { ...TARGETS[current.current] };
     let energy = 0;
+    let clock = 0;
+    let last = performance.now();
     let frame = 0;
-    const started = performance.now();
+    let running = false;
 
-    const draw = (now: number) => {
-      const seconds = (now - started) / 1000;
-      const target = loudness(state, seconds, level.current);
+    const step = (now: number) => {
+      const elapsed = Math.min((now - last) / 1000, 0.1);
+      last = now;
+      const state = current.current;
+      const target = TARGETS[state];
+      const ease = reduced ? 1 : 1 - Math.exp(-elapsed * 8);
+      let settled = true;
+      for (const key of ["waves", "dots", "ripples"] as const) {
+        layers[key] += (target[key] - layers[key]) * ease;
+        if (Math.abs(target[key] - layers[key]) < 0.002) {
+          layers[key] = target[key];
+        } else {
+          settled = false;
+        }
+      }
+      const heard =
+        state === "listening" || state === "responding" ? level.current : 0;
       // Rises quickly to a peak and settles slowly, like a level meter.
-      energy += (target - energy) * (target > energy ? 0.35 : 0.08);
+      energy += (heard - energy) * (heard > energy ? 0.35 : 0.08);
       level.current *= 0.9;
-      paint(context, seconds * look.speed, energy);
-      if (!still) frame = requestAnimationFrame(draw);
+      const moving = state !== "off" && !reduced;
+      if (moving) clock += elapsed;
+      paint(context, {
+        layers,
+        time: clock,
+        energy: reduced ? 0 : energy,
+        waveColor: color(state),
+        dotColor: color("processing"),
+        rippleColor: color("responding"),
+      });
+      running = moving || !settled || energy > 0.002;
+      frame = running ? requestAnimationFrame(step) : 0;
     };
-    draw(started);
-    return () => cancelAnimationFrame(frame);
-  }, [state]);
+    wake.current = () => {
+      if (running) return;
+      running = true;
+      last = performance.now();
+      frame = requestAnimationFrame(step);
+    };
+    step(last);
+    return () => {
+      cancelAnimationFrame(frame);
+      wake.current = () => {};
+    };
+  }, []);
 
   return (
     <canvas
@@ -75,49 +133,91 @@ export function VoiceOrb({ state }: { state: VoiceState }) {
   );
 }
 
-/** The microphone while listening, Luna's own voice while replying, a rhythm while thinking. */
-function loudness(state: VoiceState, seconds: number, measured: number) {
-  switch (state) {
-    case "listening":
-    case "responding":
-      return measured;
-    case "processing":
-      return 0.2 + 0.1 * Math.sin(seconds * 4);
-    case "off":
-      return 0;
-  }
+interface Scene {
+  layers: Layers;
+  time: number;
+  energy: number;
+  waveColor: string;
+  dotColor: string;
+  rippleColor: string;
 }
 
-/** The outline's distance from the centre at an angle, as a fraction of the canvas radius. */
-function outline(angle: number, time: number, energy: number) {
-  let radius = 0.62 + energy * 0.06;
-  for (const { count, reach, speed } of RIPPLES) {
-    radius +=
-      reach * (0.6 + energy * 4) * Math.sin(count * angle + time * speed * 3);
-  }
-  return Math.min(radius, 0.98);
-}
-
-/** Dots inside the outline, largest at the centre and fading towards the edge. */
-function paint(
-  context: CanvasRenderingContext2D,
-  time: number,
-  energy: number,
-) {
-  const half = SIZE / 2;
+function paint(context: CanvasRenderingContext2D, scene: Scene) {
+  const { layers } = scene;
   context.clearRect(0, 0, SIZE, SIZE);
-  for (let y = SPACING / 2; y < SIZE; y += SPACING) {
-    for (let x = SPACING / 2; x < SIZE; x += SPACING) {
-      const dx = x - half;
-      const dy = y - half;
-      const distance = Math.hypot(dx, dy) / half;
-      const edge = outline(Math.atan2(dy, dx), time, energy);
-      if (distance > edge) continue;
-      const depth = 1 - distance / edge;
-      const size = Math.min(1, 0.25 + depth * 1.1);
-      context.beginPath();
-      context.arc(x, y, (SPACING / 2) * size, 0, Math.PI * 2);
-      context.fill();
+  context.globalAlpha = 0.35;
+  context.strokeStyle = scene.waveColor;
+  context.lineWidth = 1.5;
+  context.beginPath();
+  context.arc(CENTER, CENTER, RADIUS, 0, Math.PI * 2);
+  context.stroke();
+  if (layers.ripples > 0) drawRipples(context, scene);
+  if (layers.waves > 0) drawWaves(context, scene);
+  if (layers.dots > 0) drawDots(context, scene);
+  context.globalAlpha = 1;
+}
+
+/** Smooth zigzag lines inside the circle. They flatten at its edge and grow with loudness. */
+function drawWaves(context: CanvasRenderingContext2D, scene: Scene) {
+  const weight = scene.layers.waves;
+  const amplitude = RADIUS * (0.2 + 0.55 * scene.energy) * weight;
+  context.save();
+  context.beginPath();
+  context.arc(CENTER, CENTER, RADIUS - 1, 0, Math.PI * 2);
+  context.clip();
+  context.strokeStyle = scene.waveColor;
+  context.lineCap = "round";
+  context.lineJoin = "round";
+  for (const wave of WAVES) {
+    context.globalAlpha = weight * (0.35 + 0.65 * wave.strength);
+    context.lineWidth = 1.2 + wave.strength * 1.3;
+    context.beginPath();
+    for (let index = 0; index <= 64; index++) {
+      const along = index / 64;
+      const x = CENTER - RADIUS + along * RADIUS * 2;
+      const taper = Math.sin(Math.PI * along) ** 2;
+      const phase =
+        along * Math.PI * 2 * wave.frequency +
+        wave.phase +
+        scene.time * wave.speed * 2;
+      const shape = Math.sin(phase) * 0.75 + Math.sin(phase * 1.9) * 0.25;
+      const y = CENTER + amplitude * wave.strength * taper * shape;
+      if (index === 0) context.moveTo(x, y);
+      else context.lineTo(x, y);
     }
+    context.stroke();
   }
+  context.restore();
+}
+
+/** Three dots circling the centre while Luna thinks. */
+function drawDots(context: CanvasRenderingContext2D, scene: Scene) {
+  context.fillStyle = scene.dotColor;
+  context.globalAlpha = scene.layers.dots;
+  for (let index = 0; index < 3; index++) {
+    const angle = scene.time * 3 + (index * Math.PI * 2) / 3;
+    const x = CENTER + Math.cos(angle) * RADIUS * 0.45;
+    const y = CENTER + Math.sin(angle) * RADIUS * 0.45;
+    context.beginPath();
+    context.arc(x, y, 4.5, 0, Math.PI * 2);
+    context.fill();
+  }
+}
+
+/** Dashed rings spreading from the circle while Luna speaks, stronger when she is louder. */
+function drawRipples(context: CanvasRenderingContext2D, scene: Scene) {
+  const reach = CENTER - RADIUS - 2;
+  const strength = 0.4 + 0.6 * Math.min(1, scene.energy * 2);
+  context.strokeStyle = scene.rippleColor;
+  context.setLineDash([3, 4]);
+  context.lineDashOffset = -scene.time * 18;
+  for (let index = 0; index < 3; index++) {
+    const progress = (scene.time * 0.6 + index / 3) % 1;
+    context.globalAlpha = scene.layers.ripples * (1 - progress) * strength;
+    context.lineWidth = 2 - progress;
+    context.beginPath();
+    context.arc(CENTER, CENTER, RADIUS + progress * reach, 0, Math.PI * 2);
+    context.stroke();
+  }
+  context.setLineDash([]);
 }

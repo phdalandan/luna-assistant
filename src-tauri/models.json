@@ -129,14 +129,18 @@
       "window_size": 512
     },
     "transcription": {
-      "file": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en-q5_1.bin",
-        "file_name": "ggml-small.en-q5_1.bin",
-        "size": 190098681,
-        "sha256": "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30"
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+        "file_name": "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+        "size": 482468385,
+        "sha256": "157c157bc51155e03e37d2466522a3a737dd9c72bb25f36eb18912964161e1ad"
       },
-      "license": "MIT",
-      "language": "en"
+      "license": "CC-BY-4.0",
+      "encoder": "encoder.int8.onnx",
+      "decoder": "decoder.int8.onnx",
+      "joiner": "joiner.int8.onnx",
+      "tokens": "tokens.txt",
+      "model_type": "nemo_transducer"
     },
     "speech_output": {
       "archive": {

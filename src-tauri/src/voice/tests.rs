@@ -25,9 +25,8 @@ fn models_dir() -> PathBuf {
     env_dir("LUNA_SPEECH_DIR")
 }
 
-fn whisper_file() -> String {
-    std::env::var("LUNA_WHISPER_FILE")
-        .unwrap_or_else(|_| catalog::speech().transcription.file.file_name.clone())
+fn transcription_dir() -> PathBuf {
+    models_dir().join("transcription")
 }
 
 fn read_wav(name: &str) -> Vec<f32> {
@@ -95,14 +94,9 @@ fn measure_wake_word_and_transcription() {
     );
     let before = resident_megabytes();
     let started = Instant::now();
-    let mut transcriber =
-        Transcriber::load(&models.join(whisper_file()), &speech.transcription).unwrap();
-    if let Ok(words) = std::env::var("LUNA_WHISPER_PROMPT") {
-        transcriber.expect_words(&words).unwrap();
-    }
+    let transcriber = Transcriber::load(&transcription_dir(), &speech.transcription).unwrap();
     println!(
-        "loaded {} in {} ms, +{} MB resident",
-        whisper_file(),
+        "loaded the transcription model in {} ms, +{} MB resident",
         started.elapsed().as_millis(),
         resident_megabytes() - before
     );
@@ -127,7 +121,7 @@ fn measure_wake_word_and_transcription() {
         let text = transcriber.transcribe(&samples).unwrap();
         let audio = samples.len() as f32 / SAMPLE_RATE as f32;
         println!(
-            "{name:<22} {audio:>4.1}s | wake {:<12} | whisper {:>5} ms | {text}",
+            "{name:<22} {audio:>4.1}s | wake {:<12} | transcribed {:>5} ms | {text}",
             format!("{heard_at:?}"),
             started.elapsed().as_millis(),
         );
@@ -235,7 +229,7 @@ fn speech_files() -> SpeechFiles {
     SpeechFiles {
         wake_word_dir: models.join("kws"),
         speech_detection: models.join("silero_vad.onnx"),
-        transcription: models.join(whisper_file()),
+        transcription: transcription_dir(),
         speech_output_dir: models.join("kokoro"),
     }
 }
@@ -571,11 +565,53 @@ fn a_custom_wake_word_replaces_luna() {
 
 #[test]
 #[ignore = "needs speech models"]
-fn a_large_home_vocabulary_primes_transcription_without_crashing() {
-    let speech = catalog::speech();
-    let mut transcriber =
-        Transcriber::load(&models_dir().join(whisper_file()), &speech.transcription).unwrap();
-    let names: Vec<String> = (0..300).map(|n| format!("Living Room Lamp {n}")).collect();
-    transcriber.expect_words(&names.join(", ")).unwrap();
-    transcriber.expect_words("").unwrap();
+fn very_short_audio_is_transcribed_without_crashing() {
+    let transcriber =
+        Transcriber::load(&transcription_dir(), &catalog::speech().transcription).unwrap();
+    assert_eq!(transcriber.transcribe(&[]).unwrap(), "");
+    assert!(transcriber.transcribe(&[0.0; 100]).is_ok());
+}
+
+/// Accuracy on labelled recordings, each `name.wav` with its text in `name.wav.txt`:
+/// `LUNA_SPEECH_DIR=<models> LUNA_LABELLED_WAVS=<folder> cargo test --release accuracy -- --ignored`
+#[test]
+#[ignore = "needs speech models and recordings"]
+fn transcription_accuracy_on_labelled_recordings() {
+    let transcriber =
+        Transcriber::load(&transcription_dir(), &catalog::speech().transcription).unwrap();
+    let normal = |text: &str| -> String {
+        text.to_lowercase()
+            .replace('%', " percent")
+            .replace("wi-fi", "wifi")
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(env_dir("LUNA_LABELLED_WAVS"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "wav"))
+        .collect();
+    paths.sort();
+    let (mut correct, mut time) = (0, Duration::ZERO);
+    for path in &paths {
+        let expected = std::fs::read_to_string(path.with_extension("wav.txt")).unwrap();
+        let wave = sherpa_onnx::Wave::read(&path.to_string_lossy()).unwrap();
+        let started = Instant::now();
+        let text = transcriber.transcribe(wave.samples()).unwrap();
+        time += started.elapsed();
+        let right = normal(&text) == normal(&expected);
+        correct += usize::from(right);
+        println!(
+            "{} {expected} | {text}",
+            if right { "ok  " } else { "MISS" }
+        );
+    }
+    println!(
+        "{correct}/{} exact, {} ms average",
+        paths.len(),
+        time.as_millis() / paths.len().max(1) as u128
+    );
 }

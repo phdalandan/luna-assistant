@@ -3,6 +3,7 @@ use std::fmt::Write;
 
 use serde_json::Value;
 
+use super::route;
 use super::session::Memory;
 use crate::home_assistant::model::{Entity, Home};
 
@@ -270,29 +271,30 @@ fn relevant_entities<'a>(home: &'a Home, request: &str, expand_kinds: bool) -> V
 
     // Names often repeat their room ("living room blinds"). When a kind of device is named,
     // place words select through the area and kind instead of matching every name.
-    let name_words: HashSet<String> = if domains.is_empty() {
-        words.clone()
+    let place_words: HashSet<String> = home
+        .areas
+        .iter()
+        .map(|area| area.name.as_str())
+        .chain(home.floors.iter().map(|floor| floor.name.as_str()))
+        .flat_map(keywords)
+        .collect();
+    let unplaced: HashSet<String> = words.difference(&place_words).cloned().collect();
+    let name_words = if domains.is_empty() {
+        &words
     } else {
-        let place_words: HashSet<String> = home
-            .areas
-            .iter()
-            .map(|area| area.name.as_str())
-            .chain(home.floors.iter().map(|floor| floor.name.as_str()))
-            .flat_map(keywords)
-            .collect();
-        words.difference(&place_words).cloned().collect()
+        &unplaced
     };
 
     let mut scored: Vec<(usize, &Entity)> = home
         .entities
         .values()
-        .filter(|entity| !entity.internal)
+        .filter(|entity| !entity.hidden)
         .filter_map(|entity| {
-            let name_score = overlap(&name_words, &entity.name) * 3
+            let name_score = overlap(name_words, &entity.name) * 3
                 + entity
                     .aliases
                     .iter()
-                    .map(|alias| overlap(&name_words, alias) * 3)
+                    .map(|alias| overlap(name_words, alias) * 3)
                     .sum::<usize>();
             let area_score = entity
                 .area_id
@@ -300,9 +302,14 @@ fn relevant_entities<'a>(home: &'a Home, request: &str, expand_kinds: bool) -> V
                 .and_then(|id| home.area(id))
                 .map_or(0, |area| overlap(&words, &area.name));
             let domain_match = domains.contains(entity.domain());
-            let include = name_score > 0
-                || area_score > 0 && (domains.is_empty() || domain_match)
-                || expand_kinds && !names_a_place && domain_match;
+            // Configuration entities only appear when named by more than their room.
+            let include = if entity.configuration {
+                overlap(&unplaced, &entity.name) > 0
+            } else {
+                name_score > 0
+                    || area_score > 0 && (domains.is_empty() || domain_match)
+                    || expand_kinds && !names_a_place && domain_match
+            };
             let score = name_score + area_score + usize::from(domain_match);
             include.then_some((score, entity))
         })
@@ -329,13 +336,18 @@ fn refers_back(request: &str) -> bool {
 }
 
 fn keywords(text: &str) -> HashSet<String> {
-    text.to_lowercase()
+    let words = text
+        .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|word| word.len() >= 2 && !STOP_WORDS.contains(word))
+        .map(str::to_owned)
+        .collect();
+    route::join_compounds(words)
+        .into_iter()
+        .filter(|word| word.len() >= 2 && !STOP_WORDS.contains(&word.as_str()))
         .map(|word| {
             word.strip_suffix('s')
                 .filter(|stem| stem.len() >= 3)
-                .unwrap_or(word)
+                .unwrap_or(&word)
                 .to_owned()
         })
         .collect()
@@ -427,12 +439,18 @@ mod tests {
     }
 
     #[test]
-    fn never_includes_internal_entities() {
-        let found = ids(&home(), "hidden relay child lock");
+    fn hidden_entities_are_never_included() {
+        let found = ids(&home(), "hidden relay");
+        assert!(!found.iter().any(|id| id.starts_with("switch.hidden")));
+    }
+
+    #[test]
+    fn configuration_entities_need_more_than_their_room() {
         assert!(
-            !found
-                .iter()
-                .any(|id| id.starts_with("switch.hidden") || id.contains("child"))
+            ids(&home(), "Is the child lock on?").contains(&"switch.kitchen_child_lock".into())
+        );
+        assert!(
+            !ids(&home(), "Turn off the kitchen").contains(&"switch.kitchen_child_lock".into())
         );
     }
 
