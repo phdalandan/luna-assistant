@@ -221,8 +221,10 @@ fn read_replies(mut stdout: ChildStdout, shared: &Shared, output_rate: u32) {
                     break;
                 }
                 let samples: Vec<f32> = bytes
-                    .chunks_exact(4)
-                    .map(|bytes| f32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .map(|bytes| f32::from_le_bytes(*bytes))
                     .collect();
                 match &resampler {
                     Some(resampler) => resampler.resample(&samples, false),
