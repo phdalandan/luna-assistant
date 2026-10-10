@@ -6,6 +6,7 @@ mod address;
 mod buffer;
 mod capture;
 mod conversation;
+mod keyword;
 mod listener;
 mod speak;
 mod transcribe;
@@ -26,6 +27,7 @@ use crate::assistant::Relevance;
 pub use capture::CaptureError;
 use capture::{AudioSink, Microphone};
 pub use conversation::Timing;
+pub use keyword::is_valid_name as is_valid_wake_word;
 use listener::Listener;
 
 /// All voice processing runs on 16 kHz mono audio.
@@ -41,6 +43,8 @@ pub enum VoiceError {
     Transcription,
     #[error("text to speech is unavailable")]
     Speech,
+    #[error("the wake word cannot be spelled with the keyword model")]
+    WakeWord,
     #[error(transparent)]
     Capture(#[from] CaptureError),
 }
@@ -132,6 +136,7 @@ impl Voice {
     pub fn start(
         &self,
         files: SpeechFiles,
+        wake_word: String,
         timing: Timing,
         host: Arc<dyn Host>,
     ) -> Result<(), VoiceError> {
@@ -158,7 +163,8 @@ impl Voice {
             std::thread::Builder::new()
                 .name("luna-voice".into())
                 .spawn(move || {
-                    let listener = Listener::new(files, timing, sample_rate, host, channels);
+                    let listener =
+                        Listener::new(files, wake_word, timing, sample_rate, host, channels);
                     match listener {
                         Ok(listener) => {
                             let _ = ready_tx.send(Ok(()));

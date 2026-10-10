@@ -52,7 +52,8 @@ microphone (CPAL, mono) ─▶ resample to 16 kHz ─▶ 5 s rolling buffer ─�
 ```
 
 - **Passive.** Only the wake word spotter runs. Audio lives in a fixed 5 second ring buffer that overwrites itself; nothing is transcribed, logged, or stored. Speech detection and whisper are not loaded.
-- **Wake word anywhere.** The spotter is streaming and fires wherever "Luna" is said. The ring buffer keeps the speech before it, so "Turn off the lights, Luna" is captured whole. Speech separated from the wake word by more than a second of silence is left out.
+- **Wake word.** "Luna" by default; the user can choose any name of one to three words (letters and apostrophes) in Settings, and listening restarts with it. The keyword model is open-vocabulary, so no training is needed: `voice/keyword.rs` spells the name in the model's word pieces with the model's own sentencepiece unigram scores (`bpe.model`), matching the official tokenizer on every name tested. The addressing check uses the same name and accepts a one-letter mishearing for names of four or more letters ("Lunar" for "Luna"); shorter names must match exactly. Short or common words trigger more often.
+- **Wake word anywhere.** The spotter is streaming and fires wherever the name is said. The ring buffer keeps the speech before it, so "Turn off the lights, Luna" is captured whole. Speech separated from the wake word by more than a second of silence is left out.
 - **Addressing** (`voice/address.rs`). The transcript must use the name to address Luna: at the start ("Luna, …", "Hey Luna …"), at the end ("…, Luna?"), or set off by commas ("Could you, Luna, …"). "I saw Luna at the park" is ignored. The name is removed before the request is handled. When the name sits between two sentences, the one that reads as a home request is used. The name alone gets "Yes?" and waits for the request.
 - **Follow-ups** (`assistant/relevance.rs`). During the conversation window, speech without the name is handled only if it is clearly for Luna: a recognised request, an action or question about "it", or a device, room, or floor in this home. Everything else is dropped without logging its text and never extends the window. "Thanks" is answered and ends the conversation; "never mind" ends it silently. "Yes" and "no" answer a pending confirmation. No model pass is used to classify speech.
 - **Context.** Spoken requests use the same conversation memory as typed ones (referenced devices, last action, pending "Which one?"), so "make it 50%" and "revert that" work by voice. The voice window (20 s) is separate from that memory (2 minutes).
@@ -63,7 +64,7 @@ microphone (CPAL, mono) ─▶ resample to 16 kHz ─▶ 5 s rolling buffer ─�
 
 ### Speech models
 
-All three are downloaded together in Settings, verified against the catalogue SHA-256, and never bundled. The wake word archive is checksummed, then only the four model files the catalogue names are extracted.
+All three are downloaded together in Settings, verified against the catalogue SHA-256, and never bundled. The wake word archive is checksummed, then only the five files the catalogue names (model, tokens, and vocabulary) are extracted.
 
 | Model                  | Source                                                     | Size    | Licence    |
 | ---------------------- | ---------------------------------------------------------- | ------- | ---------- |
@@ -151,7 +152,7 @@ Memory: Luna estimates `file size + KV cache × context + 768 MB` and warns when
 - **macOS microphone in the background.** `Info.plist` provides `NSMicrophoneUsageDescription`. A signed app is needed for a stable TCC permission. Untested.
 - **Windows microphone privacy.** Desktop apps can be blocked by "Let desktop apps access your microphone". Luna explains this when CPAL reports access denied; whether Windows reports denial or delivers silence has not been tested.
 - **macOS voice.** The Metal whisper build, the AVFoundation voice, and its completion callback have not been built or run on macOS.
-- **Wake word accuracy.** Measured only with synthetic voices. False accepts per hour and miss rate with real voices, accents, and background noise are unknown. "Luna" is a short keyword; the score and threshold in the catalogue may need tuning.
+- **Wake word accuracy.** Measured only with synthetic voices. False accepts per hour and miss rate with real voices, accents, and background noise are unknown. "Luna" is a short keyword, and custom wake words were checked only with "Jarvis"; the score and threshold in the catalogue may need tuning.
 - **Build machines** need CMake and libclang (LLVM) for whisper.cpp. GitHub's Windows and macOS runners include both.
 - **Device changes.** CPAL does not emit device-change events on all hosts.
 - **Tray behaviour differs.** macOS shows the menu on click; Windows opens the window on left click and the menu on right click.
@@ -170,7 +171,7 @@ Requirements: offline, Windows and macOS, low CPU and memory, licence compatible
 | Rustpotter                   | Apache-2.0     | User-created                      | Pure Rust, very light. Accuracy relies on recorded samples; maintenance is slow.                                                                                                 |
 | Snowboy, Mycroft Precise     | Apache-2.0     | Varies                            | Unmaintained. Rejected.                                                                                                                                                          |
 
-**Chosen:** sherpa-onnx keyword spotting with the keyword "Luna" alone, so it can be said anywhere in a sentence. Measured results are in Voice. microWakeWord remains the alternative if accuracy is insufficient with real voices; switching requires approval under the fallback policy. Silero VAD (MIT) runs only after the wake word fires.
+**Chosen:** sherpa-onnx keyword spotting with the name alone ("Luna" by default, or the user's choice), so it can be said anywhere in a sentence. Measured results are in Voice. microWakeWord remains the alternative if accuracy is insufficient with real voices; switching requires approval under the fallback policy. Silero VAD (MIT) runs only after the wake word fires.
 
 ## Licence audit
 

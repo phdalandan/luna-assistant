@@ -1,10 +1,8 @@
-//! Decides from a transcript whether Luna was spoken to, and extracts the request.
-//! The name must be used to address Luna: at the start ("Luna, …", "Hey Luna …"), at the end
-//! ("…, Luna?"), or set off by commas in the middle ("Could you, Luna, …"). A mention such as
-//! "I told Luna about it" does not count.
+//! Decides from a transcript whether Luna was spoken to by her wake word, and extracts the
+//! request. The name must be used to address her: at the start ("Luna, …", "Hey Luna …"), at the
+//! end ("…, Luna?"), or set off by commas in the middle ("Could you, Luna, …"). A mention such
+//! as "I told Luna about it" does not count.
 
-/// Transcriptions of "Luna" that only count when the word is used as a name.
-const NAMES: &[&str] = &["luna", "loona", "lunar", "luner"];
 const GREETINGS: &[&str] = &["hey", "hi", "hello", "ok", "okay", "oh", "yo"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,10 +16,14 @@ pub enum Addressed {
     NotForLuna,
 }
 
-pub fn extract(transcript: &str) -> Addressed {
+pub fn extract(transcript: &str, wake_word: &str) -> Addressed {
+    let name: Vec<String> = wake_word
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
     let sentences = sentences(&clean(transcript));
     for (index, sentence) in sentences.iter().enumerate() {
-        let Some((rest, at_end)) = without_name(sentence) else {
+        let Some((rest, at_end)) = without_name(sentence, &name) else {
             continue;
         };
         if has_words(&rest) {
@@ -99,28 +101,51 @@ fn words(sentence: &str) -> Vec<Word<'_>> {
         .collect()
 }
 
-fn is_name(word: &Word<'_>) -> bool {
-    NAMES.contains(&word.text.to_lowercase().as_str())
+/// The transcript may misspell a longer name by one letter, as in "Lunar" for "Luna".
+fn sounds_like(heard: &str, name: &str) -> bool {
+    let heard = heard.to_lowercase();
+    heard == name || (name.chars().count() >= 4 && edit_distance(&heard, name) <= 1)
+}
+
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b: Vec<char> = b.chars().collect();
+    let mut previous: Vec<usize> = (0..=b.len()).collect();
+    for (i, a) in a.chars().enumerate() {
+        let mut current = vec![i + 1];
+        for (j, b) in b.iter().enumerate() {
+            let substitution = previous[j] + usize::from(a != *b);
+            current.push(substitution.min(previous[j + 1] + 1).min(current[j] + 1));
+        }
+        previous = current;
+    }
+    previous[b.len()]
 }
 
 /// The sentence without the name, if the name is used to address Luna, and whether the name
 /// ended the sentence.
-fn without_name(sentence: &str) -> Option<(String, bool)> {
+fn without_name(sentence: &str, name: &[String]) -> Option<(String, bool)> {
     let words = words(sentence);
-    let position = words.iter().position(is_name)?;
+    if name.is_empty() || words.len() < name.len() {
+        return None;
+    }
+    let position = (0..=words.len() - name.len()).find(|&start| {
+        name.iter()
+            .enumerate()
+            .all(|(offset, part)| sounds_like(words[start + offset].text, part))
+    })?;
+    let end = position + name.len();
     let leading_greetings = words[..position]
         .iter()
         .all(|word| GREETINGS.contains(&word.text.to_lowercase().as_str()));
-    let at_end = position == words.len() - 1;
-    let set_off = position > 0 && words[position - 1].pause_after && words[position].pause_after;
+    let at_end = end == words.len();
+    let set_off = position > 0 && words[position - 1].pause_after && words[end - 1].pause_after;
     let kept: Vec<&str> = if leading_greetings {
-        words[position + 1..].iter().map(|word| word.text).collect()
+        words[end..].iter().map(|word| word.text).collect()
     } else if at_end || set_off {
-        words
+        words[..position]
             .iter()
-            .enumerate()
-            .filter(|(index, _)| *index != position)
-            .map(|(_, word)| word.text)
+            .chain(&words[end..])
+            .map(|word| word.text)
             .collect()
     } else {
         return None;
@@ -148,15 +173,15 @@ mod tests {
     #[test]
     fn the_name_at_the_start_is_removed() {
         assert_eq!(
-            extract("Luna, turn off the lights."),
+            extract("Luna, turn off the lights.", "Luna"),
             request("Turn off the lights")
         );
         assert_eq!(
-            extract("Hey Luna, is the garage open?"),
+            extract("Hey Luna, is the garage open?", "Luna"),
             request("Is the garage open")
         );
         assert_eq!(
-            extract("Hey, Luna. Is the garage open?"),
+            extract("Hey, Luna. Is the garage open?", "Luna"),
             request("Is the garage open")
         );
     }
@@ -164,15 +189,18 @@ mod tests {
     #[test]
     fn the_name_at_the_end_is_removed() {
         assert_eq!(
-            extract("Can you turn off the lights, Luna?"),
+            extract("Can you turn off the lights, Luna?", "Luna"),
             request("Can you turn off the lights")
         );
         assert_eq!(
-            extract("Turn the bedroom AC down, Luna."),
+            extract("Turn the bedroom AC down, Luna.", "Luna"),
             request("Turn the bedroom AC down")
         );
         assert_eq!(
-            extract("Could you check the temperature in the living room Luna?"),
+            extract(
+                "Could you check the temperature in the living room Luna?",
+                "Luna"
+            ),
             request("Could you check the temperature in the living room")
         );
     }
@@ -180,7 +208,10 @@ mod tests {
     #[test]
     fn the_name_in_the_middle_counts_when_set_off_by_commas() {
         assert_eq!(
-            extract("Could you, Luna, check the temperature in the kitchen?"),
+            extract(
+                "Could you, Luna, check the temperature in the kitchen?",
+                "Luna"
+            ),
             request("Could you check the temperature in the kitchen")
         );
     }
@@ -195,14 +226,21 @@ mod tests {
             "",
             "[BLANK_AUDIO]",
         ] {
-            assert_eq!(extract(transcript), Addressed::NotForLuna, "{transcript}");
+            assert_eq!(
+                extract(transcript, "Luna"),
+                Addressed::NotForLuna,
+                "{transcript}"
+            );
         }
     }
 
     #[test]
     fn only_the_addressed_sentence_is_kept() {
         assert_eq!(
-            extract("Dinner was great. Luna, turn off the kitchen lights."),
+            extract(
+                "Dinner was great. Luna, turn off the kitchen lights.",
+                "Luna"
+            ),
             request("Turn off the kitchen lights")
         );
     }
@@ -210,7 +248,10 @@ mod tests {
     #[test]
     fn a_name_between_sentences_offers_both() {
         assert_eq!(
-            extract("Dinner was great, Luna. Turn off the kitchen lights."),
+            extract(
+                "Dinner was great, Luna. Turn off the kitchen lights.",
+                "Luna"
+            ),
             Addressed::Request(vec![
                 "Dinner was great".into(),
                 "Turn off the kitchen lights".into()
@@ -220,14 +261,14 @@ mod tests {
 
     #[test]
     fn the_name_alone_waits_for_the_request() {
-        assert_eq!(extract("Luna?"), Addressed::NameOnly);
-        assert_eq!(extract("Hey Luna."), Addressed::NameOnly);
+        assert_eq!(extract("Luna?", "Luna"), Addressed::NameOnly);
+        assert_eq!(extract("Hey Luna.", "Luna"), Addressed::NameOnly);
         assert_eq!(
-            extract("Luna. Turn off the lights."),
+            extract("Luna. Turn off the lights.", "Luna"),
             request("Turn off the lights")
         );
         assert_eq!(
-            extract("Turn off the lights. Luna."),
+            extract("Turn off the lights. Luna.", "Luna"),
             request("Turn off the lights")
         );
     }
@@ -235,8 +276,44 @@ mod tests {
     #[test]
     fn mistranscribed_names_count_only_when_addressing() {
         assert_eq!(
-            extract("Lunar, turn on the porch light."),
+            extract("Lunar, turn on the porch light.", "Luna"),
             request("Turn on the porch light")
+        );
+    }
+
+    #[test]
+    fn any_wake_word_works_the_same_way() {
+        assert_eq!(
+            extract("Jarvis, turn off the lights.", "Jarvis"),
+            request("Turn off the lights")
+        );
+        assert_eq!(
+            extract("Turn off the lights, Mary Jane.", "Mary Jane"),
+            request("Turn off the lights")
+        );
+        assert_eq!(
+            extract("Hey Jarvis, is the garage open?", "Hey Jarvis"),
+            request("Is the garage open")
+        );
+        assert_eq!(
+            extract("Luna, turn off the lights.", "Jarvis"),
+            Addressed::NotForLuna
+        );
+        assert_eq!(
+            extract("I asked Jarvis yesterday.", "Jarvis"),
+            Addressed::NotForLuna
+        );
+    }
+
+    #[test]
+    fn short_names_must_match_exactly() {
+        assert_eq!(
+            extract("Kay, turn on the fan.", "Kai"),
+            Addressed::NotForLuna
+        );
+        assert_eq!(
+            extract("Kai, turn on the fan.", "Kai"),
+            request("Turn on the fan")
         );
     }
 }

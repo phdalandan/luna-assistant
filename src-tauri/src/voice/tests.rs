@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use super::keyword::keyword_line;
 use super::listener::Listener;
 use super::transcribe::Transcriber;
 use super::wake::WakeWord;
@@ -56,6 +57,13 @@ fn wavs() -> Vec<(String, Vec<f32>)> {
         .collect()
 }
 
+fn keyword_line_for(models: &std::path::Path, name: &str) -> String {
+    let vocabulary = models
+        .join("kws")
+        .join(&catalog::speech().wake_word.vocabulary);
+    keyword_line(&std::fs::read(vocabulary).unwrap(), name).unwrap()
+}
+
 fn resident_megabytes() -> u64 {
     use sysinfo::{ProcessRefreshKind, ProcessesToUpdate, System};
     let mut system = System::new();
@@ -76,7 +84,12 @@ fn measure_wake_word_and_transcription() {
     let speech = catalog::speech();
     let models = models_dir();
     let before = resident_megabytes();
-    let mut wake = WakeWord::load(&models.join("kws"), &speech.wake_word).unwrap();
+    let mut wake = WakeWord::load(
+        &models.join("kws"),
+        &speech.wake_word,
+        &keyword_line_for(&models, "Luna"),
+    )
+    .unwrap();
     println!(
         "wake word model: +{} MB resident",
         resident_megabytes() - before
@@ -210,9 +223,16 @@ fn start(host: Arc<FakeHost>) -> Running {
         stopping: stopping.clone(),
     };
     let thread = std::thread::spawn(move || {
-        Listener::new(files, Timing::default(), SAMPLE_RATE, host, channels)
-            .unwrap()
-            .run();
+        Listener::new(
+            files,
+            "Luna".into(),
+            Timing::default(),
+            SAMPLE_RATE,
+            host,
+            channels,
+        )
+        .unwrap()
+        .run();
     });
     Running {
         input,
@@ -370,7 +390,12 @@ fn measure_passive_listening_with_the_microphone() {
     let host = FakeHost::new();
     let voice = Voice::default();
     voice
-        .start(speech_files(), Timing::default(), host.clone())
+        .start(
+            speech_files(),
+            "Luna".into(),
+            Timing::default(),
+            host.clone(),
+        )
         .unwrap();
     std::thread::sleep(Duration::from_secs(2));
     refresh(&mut system);
@@ -389,4 +414,61 @@ fn measure_passive_listening_with_the_microphone() {
     voice.stop();
     println!("stopped in {} ms", started.elapsed().as_millis());
     assert_eq!(host.state(), Some(VoiceState::Off));
+}
+
+/// Word pieces the official sentencepiece tokenizer produces for the same names.
+#[test]
+#[ignore = "needs speech models"]
+fn custom_wake_words_are_spelled_like_the_official_tokenizer() {
+    let models = models_dir();
+    for (name, expected) in [
+        ("Luna", "▁ LU N A"),
+        ("Jarvis", "▁JA R VI S"),
+        ("Hey Jarvis", "▁HE Y ▁JA R VI S"),
+        ("Max", "▁MA X"),
+        ("Computer", "▁COMP U TER"),
+        ("Mary Jane", "▁MAR Y ▁JA NE"),
+        ("Athena", "▁A TH EN A"),
+        ("Nova", "▁NO V A"),
+        ("Zephyr", "▁ Z E PH Y R"),
+        ("O'Brien", "▁O ' B RI EN"),
+        ("Kai", "▁K A I"),
+        ("Alexandria", "▁A LE X AN D RI A"),
+        ("Friday", "▁F RI DAY"),
+        ("Jeeves", "▁JE E VE S"),
+        ("Echo", "▁E CH O"),
+    ] {
+        assert_eq!(
+            keyword_line_for(&models, name),
+            format!("{expected} @WAKE"),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs speech models and recordings"]
+fn a_custom_wake_word_replaces_luna() {
+    let models = models_dir();
+    let speech = catalog::speech();
+    let mut wake = WakeWord::load(
+        &models.join("kws"),
+        &speech.wake_word,
+        &keyword_line_for(&models, "Jarvis"),
+    )
+    .unwrap();
+    let mut heard = |name: &str| {
+        wake.reset();
+        let mut audio = read_wav(name);
+        audio.extend(vec![0.0; 8_000]);
+        audio
+            .chunks(SAMPLE_RATE as usize / 10)
+            .any(|chunk| wake.hears(chunk))
+    };
+    for name in ["jarvis_start", "jarvis_end"] {
+        assert!(heard(name), "{name}");
+    }
+    for name in ["start-Zira", "end-David", "neg_long-David"] {
+        assert!(!heard(name), "{name}");
+    }
 }

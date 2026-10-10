@@ -121,4 +121,20 @@ describe("SettingsView", () => {
       true,
     );
   });
+
+  it("saves a new wake word with the form", async () => {
+    const calls = mockBackend({
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
+    render(<SettingsView />);
+    fireEvent.change(await screen.findByLabelText("Wake word"), {
+      target: { value: "Jarvis" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.cmd === "save_settings")?.args,
+      ).toMatchObject({ settings: { wakeWord: "Jarvis" } }),
+    );
+  });
 });

@@ -157,6 +157,16 @@ export function SettingsView() {
       <fieldset>
         <legend>Voice</legend>
         <VoiceModels />
+        <label className="field">
+          <span>Wake word</span>
+          <input
+            className="input"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft.wakeWord}
+            onChange={(e) => update({ wakeWord: e.target.value })}
+          />
+        </label>
       </fieldset>
 
       <fieldset>

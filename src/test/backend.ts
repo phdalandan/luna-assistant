@@ -7,6 +7,7 @@ export const settings: Settings = {
   activeModel: null,
   contextLength: 4096,
   listening: false,
+  wakeWord: "Luna",
 };
 
 export const status: Status = {

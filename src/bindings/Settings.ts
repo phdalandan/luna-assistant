@@ -12,4 +12,4 @@ activeModel: string | null, contextLength: number,
 /**
  * Changed only from the listening control, never by saving the form.
  */
-listening: boolean, };
+listening: boolean, wakeWord: string, };

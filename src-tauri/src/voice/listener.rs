@@ -11,6 +11,7 @@ use sherpa_onnx::LinearResampler;
 use super::address::{self, Addressed};
 use super::buffer::RollingBuffer;
 use super::conversation::{Conversation, Expired, Heard, State, Timing};
+use super::keyword;
 use super::speak::Speaker;
 use super::transcribe::Transcriber;
 use super::wake::{Segment, SpeechDetector, WakeWord};
@@ -45,6 +46,7 @@ enum Interpretation {
 
 pub struct Listener {
     files: SpeechFiles,
+    wake_word: String,
     host: Arc<dyn Host>,
     input: Receiver<Input>,
     accepting: Arc<AtomicBool>,
@@ -62,6 +64,7 @@ pub struct Listener {
 impl Listener {
     pub fn new(
         files: SpeechFiles,
+        wake_word: String,
         timing: Timing,
         sample_rate: u32,
         host: Arc<dyn Host>,
@@ -73,7 +76,14 @@ impl Listener {
             accepting,
             stopping: stop_requested,
         } = channels;
-        let wake = WakeWord::load(&files.wake_word_dir, &catalog::speech().wake_word)?;
+        let model = &catalog::speech().wake_word;
+        let vocabulary =
+            std::fs::read(files.wake_word_dir.join(&model.vocabulary)).map_err(|error| {
+                log::error!("could not read the wake word vocabulary: {error}");
+                VoiceError::ModelLoad("wake word")
+            })?;
+        let line = keyword::keyword_line(&vocabulary, &wake_word).ok_or(VoiceError::WakeWord)?;
+        let wake = WakeWord::load(&files.wake_word_dir, model, &line)?;
         let resampler = if sample_rate == SAMPLE_RATE {
             None
         } else {
@@ -89,6 +99,7 @@ impl Listener {
         host.state_changed(VoiceState::Listening);
         Ok(Self {
             files,
+            wake_word,
             host,
             input,
             accepting,
@@ -281,7 +292,7 @@ impl Listener {
                 ends: relevance == Relevance::Thanks,
             },
         };
-        match address::extract(text) {
+        match address::extract(text, &self.wake_word) {
             Addressed::Request(candidates) => {
                 let likely = candidates
                     .iter()

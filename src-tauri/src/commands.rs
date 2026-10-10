@@ -194,6 +194,7 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, CommandError
 /// Saves the form. A new access token is stored only in the OS credential store.
 #[tauri::command]
 pub fn save_settings(
+    app: AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
     token: Option<String>,
@@ -220,6 +221,14 @@ pub fn save_settings(
         // The next request reloads the model with the new context length.
         let engine = state.engine.clone();
         tauri::async_runtime::spawn(async move { engine.unload().await });
+    }
+    if settings.wake_word != previous.wake_word && settings.listening {
+        // Listening restarts with the new wake word, away from the main thread.
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = listening::start(&app) {
+                log::warn!("listening did not restart with the new wake word: {error}");
+            }
+        });
     }
     Ok(settings)
 }

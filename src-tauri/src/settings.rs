@@ -3,6 +3,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::error::AppError;
+use crate::voice;
 
 pub const CONTEXT_LENGTH_RANGE: std::ops::RangeInclusive<u32> = 2048..=32_768;
 
@@ -17,6 +18,7 @@ pub struct Settings {
     pub context_length: u32,
     /// Changed only from the listening control, never by saving the form.
     pub listening: bool,
+    pub wake_word: String,
 }
 
 impl Default for Settings {
@@ -26,6 +28,7 @@ impl Default for Settings {
             active_model: None,
             context_length: 4096,
             listening: false,
+            wake_word: "Luna".into(),
         }
     }
 }
@@ -36,6 +39,8 @@ pub enum SettingsError {
     InvalidHomeAssistantUrl,
     #[error("context length is out of range")]
     ContextLengthOutOfRange,
+    #[error("invalid wake word")]
+    InvalidWakeWord,
 }
 
 impl SettingsError {
@@ -45,6 +50,9 @@ impl SettingsError {
                 "Enter a Home Assistant address like http://homeassistant.local:8123."
             }
             Self::ContextLengthOutOfRange => "Choose a context length between 2048 and 32768.",
+            Self::InvalidWakeWord => {
+                "Use a wake word of one to three words with letters only, like Luna."
+            }
         }
     }
 }
@@ -58,6 +66,11 @@ impl Settings {
                 .trim()
                 .trim_end_matches('/')
                 .to_owned(),
+            wake_word: self
+                .wake_word
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" "),
             ..self
         };
         if !settings.home_assistant_url.is_empty() && !is_http_url(&settings.home_assistant_url) {
@@ -65,6 +78,9 @@ impl Settings {
         }
         if !CONTEXT_LENGTH_RANGE.contains(&settings.context_length) {
             return Err(SettingsError::ContextLengthOutOfRange);
+        }
+        if !voice::is_valid_wake_word(&settings.wake_word) {
+            return Err(SettingsError::InvalidWakeWord);
         }
         Ok(settings)
     }
@@ -195,5 +211,25 @@ mod tests {
         conn.execute("INSERT INTO settings (id, data) VALUES (1, 'not json')", [])
             .unwrap();
         assert!(matches!(load(&conn), Err(AppError::CorruptSettings(_))));
+    }
+
+    #[test]
+    fn wake_words_are_tidied_and_checked() {
+        let settings = Settings {
+            wake_word: "  Hey   Jarvis ".into(),
+            ..valid()
+        };
+        assert_eq!(settings.validated().unwrap().wake_word, "Hey Jarvis");
+        for wake_word in ["", "R2D2", "Luna!", "one two three four"] {
+            let settings = Settings {
+                wake_word: wake_word.into(),
+                ..valid()
+            };
+            assert_eq!(
+                settings.validated(),
+                Err(SettingsError::InvalidWakeWord),
+                "{wake_word}"
+            );
+        }
     }
 }

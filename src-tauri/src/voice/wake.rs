@@ -16,7 +16,8 @@ pub struct WakeWord {
 }
 
 impl WakeWord {
-    pub fn load(dir: &Path, model: &KeywordModel) -> Result<Self, VoiceError> {
+    /// `keyword` is the wake word spelled in the model's pieces, from `keyword::keyword_line`.
+    pub fn load(dir: &Path, model: &KeywordModel, keyword: &str) -> Result<Self, VoiceError> {
         let file = |name: &str| Some(dir.join(name).to_string_lossy().into_owned());
         let config = KeywordSpotterConfig {
             model_config: OnlineModelConfig {
@@ -31,7 +32,7 @@ impl WakeWord {
             },
             keywords_score: model.score,
             keywords_threshold: model.threshold,
-            keywords_buf: Some(format!("{}\n", model.keyword)),
+            keywords_buf: Some(format!("{keyword}\n")),
             ..KeywordSpotterConfig::default()
         };
         let spotter = KeywordSpotter::create(&config).ok_or(VoiceError::ModelLoad("wake word"))?;

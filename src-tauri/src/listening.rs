@@ -59,7 +59,7 @@ fn confirmation_answer(text: &str) -> Option<bool> {
         .filter(|c| c.is_alphanumeric() || c.is_whitespace() || *c == '\'')
         .collect();
     let phrase = words.split_whitespace().collect::<Vec<_>>().join(" ");
-    let phrase = phrase.trim_end_matches(" please").trim_end_matches(" luna");
+    let phrase = phrase.trim_end_matches(" please");
     if AFFIRMATIVE.contains(&phrase) {
         Some(true)
     } else if NEGATIVE.contains(&phrase) {
@@ -162,8 +162,9 @@ pub fn start(app: &AppHandle) -> Result<(), AppError> {
         set_status(app, VoiceState::Off, Some(error.user_message()));
         return Err(error);
     };
+    let wake_word = state.settings()?.wake_word;
     let host = Arc::new(VoiceHost { app: app.clone() });
-    if let Err(error) = state.voice.start(files, Timing::default(), host) {
+    if let Err(error) = state.voice.start(files, wake_word, Timing::default(), host) {
         set_status(app, VoiceState::Off, Some(problem(&error)));
         return Err(AppError::Voice(error));
     }
@@ -200,6 +201,7 @@ pub fn problem(error: &VoiceError) -> String {
             "Voice couldn't start. Download the voice models again in Settings."
         }
         VoiceError::Speech => "Spoken replies aren't available on this computer.",
+        VoiceError::WakeWord => "Luna can't listen for that wake word. Try another in Settings.",
     }
     .to_owned()
 }
@@ -222,7 +224,7 @@ mod tests {
     fn confirmations_are_answered_by_voice() {
         assert_eq!(confirmation_answer("Yes."), Some(true));
         assert_eq!(confirmation_answer("Yeah, go ahead"), None);
-        assert_eq!(confirmation_answer("Go ahead, Luna."), Some(true));
+        assert_eq!(confirmation_answer("Go ahead, please."), Some(true));
         assert_eq!(confirmation_answer("No."), Some(false));
         assert_eq!(confirmation_answer("Don't."), Some(false));
         assert_eq!(confirmation_answer("Turn off the lights."), None);

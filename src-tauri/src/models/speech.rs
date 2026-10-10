@@ -60,15 +60,21 @@ pub struct KeywordModel {
     pub decoder: String,
     pub joiner: String,
     pub tokens: String,
-    /// The wake word in the model's own tokens, as sherpa-onnx expects.
-    pub keyword: String,
+    /// The sentencepiece model whose pieces spell the chosen wake word.
+    pub vocabulary: String,
     pub score: f32,
     pub threshold: f32,
 }
 
 impl KeywordModel {
-    pub fn extracted_files(&self) -> [&str; 4] {
-        [&self.encoder, &self.decoder, &self.joiner, &self.tokens]
+    pub fn extracted_files(&self) -> [&str; 5] {
+        [
+            &self.encoder,
+            &self.decoder,
+            &self.joiner,
+            &self.tokens,
+            &self.vocabulary,
+        ]
     }
 }
 

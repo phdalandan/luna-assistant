@@ -74,7 +74,7 @@
       "decoder": "decoder-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
       "joiner": "joiner-epoch-12-avg-2-chunk-16-left-64.int8.onnx",
       "tokens": "tokens.txt",
-      "keyword": "▁ LU N A @LUNA",
+      "vocabulary": "bpe.model",
       "score": 1.0,
       "threshold": 0.25
     },
