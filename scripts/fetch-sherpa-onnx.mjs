@@ -72,12 +72,7 @@ async function fetchInto(archive, directory) {
   }
   const url = `https://github.com/k2-fsa/sherpa-onnx/releases/download/v${VERSION}/${archive.name}.tar.bz2`;
   console.log(`Downloading ${archive.name}.`);
-  const response = await fetch(url);
-  if (!response.ok) {
-    console.error(`Download failed: ${response.status} ${url}`);
-    process.exit(1);
-  }
-  const bytes = Buffer.from(await response.arrayBuffer());
+  const bytes = await download(url);
   const actual = createHash("sha256").update(bytes).digest("hex");
   if (actual !== archive.sha256) {
     console.error(`Checksum mismatch for ${archive.name}.`);
@@ -101,4 +96,25 @@ async function fetchInto(archive, directory) {
   );
   rmSync(join(directory, `${archive.name}.tar.bz2`));
   writeFileSync(stamp, archive.sha256);
+}
+
+// Connections to GitHub's release storage sometimes drop on CI runners, so network
+// failures are retried. HTTP errors and checksum mismatches are not.
+async function download(url, attempts = 3) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        console.error(`Download failed: ${response.status} ${url}`);
+        process.exit(1);
+      }
+      return Buffer.from(await response.arrayBuffer());
+    } catch (error) {
+      if (attempt === attempts) throw error;
+      console.warn(
+        `Download interrupted (${error.cause?.code ?? error.message}). Retrying.`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 5000 * attempt));
+    }
+  }
 }
