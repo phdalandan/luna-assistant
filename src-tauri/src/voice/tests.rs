@@ -246,6 +246,7 @@ fn voice_settings(wake_word: &str) -> VoiceSettings {
     );
     VoiceSettings {
         wake_word: wake_word.into(),
+        microphone: None,
         voice: "af_heart".into(),
         helper,
         cloud_transcription: false,

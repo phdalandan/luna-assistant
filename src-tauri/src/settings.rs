@@ -30,6 +30,8 @@ pub struct Settings {
     /// Changed only from the listening control, never by saving the form.
     pub listening: bool,
     pub wake_word: String,
+    /// A microphone id, or `None` for the system default.
+    pub microphone: Option<String>,
     /// A voice id from the catalogue.
     pub voice: String,
     /// Changed only from the Local and Cloud control, never by saving the form.
@@ -49,6 +51,7 @@ impl Default for Settings {
             context_length: 4096,
             listening: false,
             wake_word: "Luna".into(),
+            microphone: None,
             voice: "af_heart".into(),
             inference: InferenceMode::Local,
             speech_recognition: InferenceMode::Local,
@@ -81,7 +84,7 @@ impl SettingsError {
             }
             Self::ContextLengthOutOfRange => "Choose a context length between 2048 and 32768.",
             Self::InvalidWakeWord => {
-                "Use a wake word of one to three words with letters only, like Luna."
+                "Use a wake phrase of one to three words with letters only, like Luna."
             }
             Self::UnknownVoice => "Choose one of the listed voices.",
             Self::UnknownCloudModel => "Choose one of the listed models.",

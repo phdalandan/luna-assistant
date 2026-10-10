@@ -17,7 +17,7 @@ export function VoiceModels() {
   const download = voice.download;
 
   return (
-    <div className="model" aria-label="Speech models">
+    <div className="speech-models" aria-label="Speech models">
       <div className="model-header">
         <div>
           <p className="model-name">Speech models</p>

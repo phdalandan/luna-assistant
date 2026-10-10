@@ -4,12 +4,15 @@ use std::sync::mpsc;
 use std::thread::JoinHandle;
 
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{ErrorKind, SampleFormat, StreamConfig};
+use cpal::{DeviceId, ErrorKind, SampleFormat, StreamConfig};
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum CaptureError {
     #[error("no microphone found")]
     NoDevice,
+    #[error("the chosen microphone is not connected")]
+    ChosenDeviceMissing,
     #[error("microphone access denied")]
     PermissionDenied,
     #[error("microphone disconnected")]
@@ -28,6 +31,31 @@ impl From<&cpal::Error> for CaptureError {
     }
 }
 
+/// A microphone the user can choose in Settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct MicrophoneOption {
+    pub id: String,
+    pub name: String,
+}
+
+/// The microphones connected now. Devices that cannot be described are left out and logged.
+pub fn microphones() -> Result<Vec<MicrophoneOption>, cpal::Error> {
+    Ok(cpal::default_host()
+        .input_devices()?
+        .filter_map(|device| match (device.id(), device.description()) {
+            (Ok(id), Ok(description)) => Some(MicrophoneOption {
+                id: id.to_string(),
+                name: description.name().to_owned(),
+            }),
+            (Err(error), _) | (_, Err(error)) => {
+                log::warn!("could not describe a microphone: {error}");
+                None
+            }
+        })
+        .collect())
+}
+
 /// Receives mono audio at `sample_rate`, or the error that stopped capture.
 pub trait AudioSink: Send + Sync + 'static {
     fn audio(&self, samples: Vec<f32>);
@@ -41,12 +69,13 @@ pub struct Microphone {
 }
 
 impl Microphone {
-    pub fn start(sink: impl AudioSink) -> Result<Self, CaptureError> {
+    /// Starts the chosen microphone, or the system default when `device` is `None`.
+    pub fn start(device: Option<String>, sink: impl AudioSink) -> Result<Self, CaptureError> {
         let (ready_tx, ready_rx) = mpsc::channel();
         let (stop, stopped) = mpsc::channel::<()>();
         let thread = std::thread::Builder::new()
             .name("luna-microphone".into())
-            .spawn(move || match open(sink) {
+            .spawn(move || match open(device.as_deref(), sink) {
                 Ok((stream, sample_rate)) => {
                     let _ = ready_tx.send(Ok(sample_rate));
                     // Blocks until `Microphone` is dropped; the stream stops with it.
@@ -79,10 +108,21 @@ impl Drop for Microphone {
     }
 }
 
-fn open(sink: impl AudioSink) -> Result<(cpal::Stream, u32), CaptureError> {
-    let device = cpal::default_host()
-        .default_input_device()
-        .ok_or(CaptureError::NoDevice)?;
+fn find(device: Option<&str>) -> Result<cpal::Device, CaptureError> {
+    let host = cpal::default_host();
+    let Some(id) = device else {
+        return host.default_input_device().ok_or(CaptureError::NoDevice);
+    };
+    let id: DeviceId = id.parse().map_err(|error| {
+        log::error!("invalid microphone id {id:?}: {error}");
+        CaptureError::ChosenDeviceMissing
+    })?;
+    host.device_by_id(&id)
+        .ok_or(CaptureError::ChosenDeviceMissing)
+}
+
+fn open(device: Option<&str>, sink: impl AudioSink) -> Result<(cpal::Stream, u32), CaptureError> {
+    let device = find(device)?;
     let supported = device.default_input_config().map_err(|error| {
         log::error!("microphone configuration unavailable: {error}");
         CaptureError::from(&error)

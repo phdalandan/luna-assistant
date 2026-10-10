@@ -6,6 +6,7 @@ import type { CommandError } from "../bindings/CommandError";
 import type { DiscoveredInstance } from "../bindings/DiscoveredInstance";
 import type { InferenceMode } from "../bindings/InferenceMode";
 import type { Interaction } from "../bindings/Interaction";
+import type { MicrophoneOption } from "../bindings/MicrophoneOption";
 import type { ModelInfo } from "../bindings/ModelInfo";
 import type { Settings } from "../bindings/Settings";
 import type { Status } from "../bindings/Status";
@@ -20,6 +21,7 @@ export type {
   DiscoveredInstance,
   InferenceMode,
   Interaction,
+  MicrophoneOption,
   ModelInfo,
   Settings,
   Status,
@@ -73,6 +75,7 @@ export const api = {
     invoke<null>("set_listening", { enabled }),
   getVoiceModels: () => invoke<VoiceModelsInfo>("get_voice_models"),
   listVoices: () => invoke<VoiceOption[]>("list_voices"),
+  listMicrophones: () => invoke<MicrophoneOption[]>("list_microphones"),
   downloadVoiceModels: () => invoke<null>("download_voice_models"),
   cancelVoiceDownload: () => invoke<null>("cancel_voice_download"),
 };

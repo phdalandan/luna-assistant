@@ -126,23 +126,6 @@ describe("AssistantView", () => {
     );
   });
 
-  it("turns listening on and off from the microphone control", async () => {
-    const calls = mockBackend({
-      list_models: active,
-      get_status: () => ({
-        ...status,
-        voice: { state: "listening", problem: null },
-      }),
-    });
-    render(<AssistantView />);
-    const control = await screen.findByRole("button", { name: "Listening" });
-    expect(control.getAttribute("aria-pressed")).toBe("true");
-    fireEvent.click(control);
-    expect(calls.find((call) => call.cmd === "set_listening")?.args).toEqual({
-      enabled: false,
-    });
-  });
-
   it("explains why listening stopped", async () => {
     mockBackend({
       list_models: active,
@@ -158,7 +141,6 @@ describe("AssistantView", () => {
     expect(
       await screen.findByText("The microphone was disconnected."),
     ).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Microphone off" })).toBeTruthy();
   });
 
   it("counts down to when the conversation resets", async () => {
@@ -172,20 +154,5 @@ describe("AssistantView", () => {
     render(<AssistantView />);
     expect(await screen.findByText("Conversation resets in 1:31")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Luna" })).toBeNull();
-  });
-
-  it("leaves listening failures to the voice status instead of repeating them", async () => {
-    mockBackend({
-      list_models: active,
-      set_listening: () => {
-        throw { message: "Download the voice models in Settings first." };
-      },
-    });
-    render(<AssistantView />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "Microphone off" }),
-    );
-    await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

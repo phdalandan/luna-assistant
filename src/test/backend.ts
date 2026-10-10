@@ -8,6 +8,7 @@ export const settings: Settings = {
   contextLength: 4096,
   listening: false,
   wakeWord: "Luna",
+  microphone: null,
   voice: "af_heart",
   inference: "local",
   speechRecognition: "local",
@@ -76,6 +77,9 @@ export function mockBackend(overrides: Record<string, Handler> = {}) {
     list_voices: () => [
       { id: "af_heart", name: "Heart", accent: "US" },
       { id: "bm_george", name: "George", accent: "UK" },
+    ],
+    list_microphones: () => [
+      { id: "coreaudio:BuiltInMicrophoneDevice", name: "MacBook Microphone" },
     ],
     "plugin:event|listen": () => 1,
     "plugin:event|unlisten": () => undefined,

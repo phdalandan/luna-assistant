@@ -16,6 +16,10 @@ activeModel: string | null, contextLength: number,
  */
 listening: boolean, wakeWord: string, 
 /**
+ * A microphone id, or `None` for the system default.
+ */
+microphone: string | null, 
+/**
  * A voice id from the catalogue.
  */
 voice: string, 

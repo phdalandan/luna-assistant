@@ -171,6 +171,7 @@ pub fn start(app: &AppHandle) -> Result<(), AppError> {
         .and_then(|helper| {
             let settings = VoiceSettings {
                 wake_word: saved.wake_word,
+                microphone: saved.microphone,
                 voice: saved.voice,
                 helper,
                 cloud_transcription: saved.speech_recognition == InferenceMode::Cloud,
@@ -205,6 +206,9 @@ pub fn problem(error: &VoiceError) -> String {
         VoiceError::Capture(CaptureError::NoDevice) => {
             "No microphone found. Connect one, then turn listening on."
         }
+        VoiceError::Capture(CaptureError::ChosenDeviceMissing) => {
+            "The chosen microphone isn't connected. Connect it or choose another in Settings."
+        }
         VoiceError::Capture(CaptureError::Disconnected) => {
             "The microphone was disconnected. Turn listening on when it's back."
         }
@@ -217,7 +221,7 @@ pub fn problem(error: &VoiceError) -> String {
         VoiceError::Speech => {
             "Luna's voice couldn't start. Download the voice models again in Settings."
         }
-        VoiceError::WakeWord => "Luna can't listen for that wake word. Try another in Settings.",
+        VoiceError::WakeWord => "Luna can't listen for that wake phrase. Try another in Settings.",
     }
     .to_owned()
 }

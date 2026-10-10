@@ -38,22 +38,40 @@ export function CloudSettings({
 
   return (
     <>
-      <label className="field">
-        <span>Provider</span>
-        <select
-          className="input"
-          value={provider}
-          onChange={(e) =>
-            update({ cloudProvider: e.target.value as CloudProvider })
-          }
-        >
-          {Object.entries(PROVIDERS).map(([id, name]) => (
-            <option key={id} value={id}>
-              {name}
-            </option>
-          ))}
-        </select>
-      </label>
+      <div className="field-pair">
+        <label className="field">
+          <span>Provider</span>
+          <select
+            className="input"
+            value={provider}
+            onChange={(e) =>
+              update({ cloudProvider: e.target.value as CloudProvider })
+            }
+          >
+            {Object.entries(PROVIDERS).map(([id, name]) => (
+              <option key={id} value={id}>
+                {name}
+              </option>
+            ))}
+          </select>
+        </label>
+        <label className="field">
+          <span>Model</span>
+          <select
+            className="input"
+            value={model}
+            onChange={(e) => chooseModel(e.target.value)}
+          >
+            {models
+              .filter((option) => option.provider === provider)
+              .map((option) => (
+                <option key={option.id} value={option.id}>
+                  {option.name}
+                </option>
+              ))}
+          </select>
+        </label>
+      </div>
       <ApiKeyField
         label="API key"
         value={apiKey}
@@ -61,25 +79,6 @@ export function CloudSettings({
         saved={savedKeys.includes(provider)}
         onRemove={() => removeKey(provider)}
       />
-      <label className="field">
-        <span>Model</span>
-        <select
-          className="input"
-          value={model}
-          onChange={(e) => chooseModel(e.target.value)}
-        >
-          {models
-            .filter((option) => option.provider === provider)
-            .map((option) => (
-              <option key={option.id} value={option.id}>
-                {option.name}
-              </option>
-            ))}
-        </select>
-      </label>
-      <p className="status-line">
-        Commands and relevant home data are sent to your selected provider.
-      </p>
     </>
   );
 }

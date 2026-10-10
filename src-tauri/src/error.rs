@@ -38,6 +38,8 @@ pub enum AppError {
     UnknownCloudModel(CloudProvider, String),
     #[error("voice models are not installed")]
     VoiceModelsMissing,
+    #[error("microphones could not be listed: {0}")]
+    Microphones(String),
     #[error("listening could not start: {0}")]
     Voice(VoiceError),
 }
@@ -67,6 +69,7 @@ impl AppError {
             }
             Self::UnknownCloudModel(..) => "This model is unavailable. Choose another in Settings.",
             Self::VoiceModelsMissing => "Download the voice models in Settings first.",
+            Self::Microphones(_) => "Couldn't find your microphones. Try again.",
             Self::Voice(error) => return crate::listening::problem(error),
         }
         .to_owned()

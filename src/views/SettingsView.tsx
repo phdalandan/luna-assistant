@@ -3,7 +3,7 @@ import type { ConnectionStatus } from "../bindings/ConnectionStatus";
 import { ApiKeyField } from "../components/ApiKeyField";
 import { CloudSettings } from "../components/CloudSettings";
 import { ModeControl } from "../components/ModeControl";
-import { ModelList } from "../components/ModelList";
+import { ModelPicker } from "../components/ModelList";
 import { VoiceModels } from "../components/VoiceModels";
 import {
   api,
@@ -12,6 +12,7 @@ import {
   type CloudProvider,
   type DiscoveredInstance,
   type InferenceMode,
+  type MicrophoneOption,
   type Settings,
   type VoiceOption,
 } from "../lib/api";
@@ -58,6 +59,7 @@ export function SettingsView() {
   const [discovered, setDiscovered] = useState<DiscoveredInstance[]>([]);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
   const [voices, setVoices] = useState<VoiceOption[]>([]);
+  const [microphones, setMicrophones] = useState<MicrophoneOption[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const status = useStatus();
@@ -86,6 +88,10 @@ export function SettingsView() {
       .then(setVoices)
       .catch((err: unknown) => setError(errorMessage(err)));
     api
+      .listMicrophones()
+      .then(setMicrophones)
+      .catch((err: unknown) => setError(errorMessage(err)));
+    api
       .savedApiKeys()
       .then(setSavedKeys)
       .catch((err: unknown) => setError(errorMessage(err)));
@@ -110,6 +116,9 @@ export function SettingsView() {
     setApiKeys((keys) => ({ ...keys, [provider]: key }));
   const badge = status && CONNECTION_BADGES[status.homeAssistant];
   const connection = status && CONNECTION_MESSAGES[status.homeAssistant];
+  const microphoneMissing =
+    draft.microphone !== null &&
+    !microphones.some((microphone) => microphone.id === draft.microphone);
   const suggestions = discovered.filter(
     (instance) => instance.url !== draft.homeAssistantUrl,
   );
@@ -229,24 +238,27 @@ export function SettingsView() {
         />
         {draft.inference === "local" ? (
           <>
-            {models && <ModelList models={models} engine={status?.engine} />}
+            {models && (
+              <ModelPicker models={models} engine={status?.engine}>
+                <label className="field">
+                  <span>Context length</span>
+                  <select
+                    className="input"
+                    value={draft.contextLength}
+                    onChange={(e) =>
+                      update({ contextLength: Number(e.target.value) })
+                    }
+                  >
+                    {CONTEXT_LENGTHS.map((length) => (
+                      <option key={length} value={length}>
+                        {length.toLocaleString()} tokens
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </ModelPicker>
+            )}
             {modelsError && <p className="error">{modelsError}</p>}
-            <label className="field">
-              <span>Context length</span>
-              <select
-                className="input"
-                value={draft.contextLength}
-                onChange={(e) =>
-                  update({ contextLength: Number(e.target.value) })
-                }
-              >
-                {CONTEXT_LENGTHS.map((length) => (
-                  <option key={length} value={length}>
-                    {length.toLocaleString()} tokens
-                  </option>
-                ))}
-              </select>
-            </label>
           </>
         ) : (
           <CloudSettings
@@ -262,40 +274,8 @@ export function SettingsView() {
       </fieldset>
 
       <fieldset>
-        <legend>Voice</legend>
+        <legend>Speech</legend>
         <VoiceModels />
-        <div className="field">
-          <span>Speech recognition</span>
-          <ModeControl
-            label="Speech recognition"
-            value={draft.speechRecognition}
-            onChange={switchSpeechRecognition}
-          />
-        </div>
-        {draft.speechRecognition === "cloud" && (
-          <>
-            <ApiKeyField
-              label="OpenAI API key"
-              value={apiKeys.openai ?? ""}
-              onChange={(key) => setApiKey("openai", key)}
-              saved={savedKeys.includes("openai")}
-              onRemove={() => removeKey("openai")}
-            />
-            <p className="status-line">
-              What you say after the wake word is sent to OpenAI.
-            </p>
-          </>
-        )}
-        <label className="field">
-          <span>Wake word</span>
-          <input
-            className="input"
-            autoComplete="off"
-            spellCheck={false}
-            value={draft.wakeWord}
-            onChange={(e) => update({ wakeWord: e.target.value })}
-          />
-        </label>
         <label className="field">
           <span>Voice</span>
           <select
@@ -310,6 +290,53 @@ export function SettingsView() {
             ))}
           </select>
         </label>
+        <div className="field">
+          <span>Speech recognition</span>
+          <ModeControl
+            label="Speech recognition"
+            value={draft.speechRecognition}
+            onChange={switchSpeechRecognition}
+          />
+        </div>
+        {draft.speechRecognition === "cloud" && (
+          <ApiKeyField
+            label="OpenAI API key"
+            value={apiKeys.openai ?? ""}
+            onChange={(key) => setApiKey("openai", key)}
+            saved={savedKeys.includes("openai")}
+            onRemove={() => removeKey("openai")}
+          />
+        )}
+        <label className="field">
+          <span>Wake phrase</span>
+          <input
+            className="input"
+            autoComplete="off"
+            spellCheck={false}
+            value={draft.wakeWord}
+            onChange={(e) => update({ wakeWord: e.target.value })}
+          />
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Microphone</legend>
+        <select
+          className="input"
+          aria-label="Microphone"
+          value={draft.microphone ?? ""}
+          onChange={(e) => update({ microphone: e.target.value || null })}
+        >
+          <option value="">System default</option>
+          {microphones.map((microphone) => (
+            <option key={microphone.id} value={microphone.id}>
+              {microphone.name}
+            </option>
+          ))}
+          {microphoneMissing && (
+            <option value={draft.microphone ?? ""}>Not connected</option>
+          )}
+        </select>
       </fieldset>
 
       <fieldset>

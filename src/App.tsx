@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { MicToggle } from "./components/MicToggle";
 import { AssistantView } from "./views/AssistantView";
 import { SettingsView } from "./views/SettingsView";
 
@@ -26,6 +27,7 @@ export function App() {
             {label}
           </button>
         ))}
+        <MicToggle />
       </nav>
       <main className="content">
         {view === "assistant" ? <AssistantView /> : <SettingsView />}

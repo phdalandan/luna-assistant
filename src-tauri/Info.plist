@@ -3,6 +3,6 @@
 <plist version="1.0">
 <dict>
   <key>NSMicrophoneUsageDescription</key>
-  <string>Luna listens for its name so you can control your home by voice. Audio never leaves this Mac.</string>
+  <string>Luna listens for its name so you can control your home by voice. Audio stays on this Mac unless you choose cloud speech recognition.</string>
 </dict>
 </plist>

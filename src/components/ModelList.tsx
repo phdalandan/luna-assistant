@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { EngineStatus } from "../bindings/EngineStatus";
 import { api, errorMessage, type ModelInfo } from "../lib/api";
 import { formatSize } from "../lib/format";
@@ -8,13 +8,17 @@ interface Props {
   engine: EngineStatus | undefined;
 }
 
-export function ModelList({ models, engine }: Props) {
+function useRun() {
   const [error, setError] = useState<string | null>(null);
-
   const run = (action: () => Promise<unknown>) => {
     setError(null);
     action().catch((err: unknown) => setError(errorMessage(err)));
   };
+  return { error, run };
+}
+
+export function ModelList({ models, engine }: Props) {
+  const { error, run } = useRun();
 
   return (
     <div className="models">
@@ -30,13 +34,64 @@ export function ModelList({ models, engine }: Props) {
   );
 }
 
+/** One dropdown for every model, with the chosen model's details and actions below it. */
+export function ModelPicker({
+  models,
+  engine,
+  children,
+}: Props & { children?: ReactNode }) {
+  const { error, run } = useRun();
+  const [chosen, setChosen] = useState<string | null>(null);
+  const selected =
+    models.find((model) => model.id === chosen) ??
+    models.find((model) => model.active) ??
+    models.find((model) => model.recommended) ??
+    models[0];
+  if (!selected) {
+    return null;
+  }
+
+  return (
+    <div className="models">
+      <div className="field-pair">
+        <label className="field">
+          <span>Model</span>
+          <select
+            className="input"
+            value={selected.id}
+            onChange={(e) => setChosen(e.target.value)}
+          >
+            {models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+        </label>
+        {children}
+      </div>
+      <ModelRow model={selected} engine={engine} run={run} named={false} />
+      {error && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 interface RowProps {
   model: ModelInfo;
   engine: EngineStatus | undefined;
   run: (action: () => Promise<unknown>) => void;
 }
 
-function ModelRow({ model, engine, run }: RowProps) {
+function ModelRow({
+  model,
+  engine,
+  run,
+  named = true,
+}: RowProps & { named?: boolean }) {
   const details = [
     model.recommended && "Recommended",
     formatSize(model.size),
@@ -47,7 +102,7 @@ function ModelRow({ model, engine, run }: RowProps) {
     <div className="model" aria-label={model.name}>
       <div className="model-header">
         <div>
-          <p className="model-name">{model.name}</p>
+          {named && <p className="model-name">{model.name}</p>}
           <p className="model-details">{details.join(" · ")}</p>
         </div>
         <ModelActions model={model} engine={engine} run={run} />

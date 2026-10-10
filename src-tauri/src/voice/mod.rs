@@ -23,8 +23,8 @@ use std::thread::JoinHandle;
 use serde::Serialize;
 
 use crate::assistant::Relevance;
-pub use capture::CaptureError;
 use capture::{AudioSink, Microphone};
+pub use capture::{CaptureError, MicrophoneOption, microphones};
 pub use conversation::Timing;
 pub use keyword::is_valid_name as is_valid_wake_word;
 use listener::Listener;
@@ -99,6 +99,8 @@ pub struct SpeechFiles {
 #[derive(Debug, Clone)]
 pub struct VoiceSettings {
     pub wake_word: String,
+    /// A microphone id from `microphones`, or `None` for the system default.
+    pub microphone: Option<String>,
     /// A voice id from the catalogue, such as "af_heart".
     pub voice: String,
     pub helper: PathBuf,
@@ -169,10 +171,13 @@ impl Voice {
         self.stop();
         let (input, receiver) = mpsc::sync_channel(AUDIO_QUEUE);
         let accepting = Arc::new(AtomicBool::new(true));
-        let mic = Microphone::start(Sink {
-            input: input.clone(),
-            accepting: accepting.clone(),
-        })?;
+        let mic = Microphone::start(
+            settings.microphone.clone(),
+            Sink {
+                input: input.clone(),
+                accepting: accepting.clone(),
+            },
+        )?;
         let sample_rate = mic.sample_rate;
         let microphone = Arc::new(Mutex::new(Some(mic)));
         let stopping = Arc::new(AtomicBool::new(false));

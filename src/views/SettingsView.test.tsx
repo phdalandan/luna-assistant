@@ -127,7 +127,7 @@ describe("SettingsView", () => {
       save_settings: (args) => (args as { settings: unknown }).settings,
     });
     render(<SettingsView />);
-    fireEvent.change(await screen.findByLabelText("Wake word"), {
+    fireEvent.change(await screen.findByLabelText("Wake phrase"), {
       target: { value: "Jarvis" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -163,6 +163,38 @@ describe("SettingsView", () => {
     );
   });
 
+  it("chooses a microphone and saves it with the form", async () => {
+    const calls = mockBackend({
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
+    render(<SettingsView />);
+    const microphone = await screen.findByLabelText("Microphone");
+    await screen.findByRole("option", { name: "MacBook Microphone" });
+    expect((microphone as HTMLSelectElement).value).toBe("");
+    fireEvent.change(microphone, {
+      target: { value: "coreaudio:BuiltInMicrophoneDevice" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.cmd === "save_settings")?.args,
+      ).toMatchObject({
+        settings: { microphone: "coreaudio:BuiltInMicrophoneDevice" },
+      }),
+    );
+  });
+
+  it("keeps a chosen microphone that is not connected", async () => {
+    mockBackend({
+      get_settings: () => ({ ...settings, microphone: "coreaudio:Gone" }),
+    });
+    render(<SettingsView />);
+    await screen.findByRole("option", { name: "Not connected" });
+    expect(
+      (screen.getByLabelText("Microphone") as HTMLSelectElement).value,
+    ).toBe("coreaudio:Gone");
+  });
+
   it("switches to cloud immediately and shows the cloud settings", async () => {
     const calls = mockBackend();
     render(<SettingsView />);
@@ -178,11 +210,6 @@ describe("SettingsView", () => {
     ).toEqual({ mode: "cloud" });
     expect(screen.queryByText("Qwen3 8B")).toBeNull();
     expect(screen.queryByLabelText("Context length")).toBeNull();
-    expect(
-      screen.getByText(
-        "Commands and relevant home data are sent to your selected provider.",
-      ),
-    ).toBeTruthy();
     expect(
       await screen.findByRole("option", { name: "GPT-6 Luna" }),
     ).toBeTruthy();
@@ -246,9 +273,6 @@ describe("SettingsView", () => {
       calls.find((call) => call.cmd === "set_speech_recognition")?.args,
     ).toEqual({ mode: "cloud" });
     expect(calls.some((call) => call.cmd === "set_inference_mode")).toBe(false);
-    expect(
-      screen.getByText("What you say after the wake word is sent to OpenAI."),
-    ).toBeTruthy();
     fireEvent.change(screen.getByLabelText("OpenAI API key"), {
       target: { value: "openai-key" },
     });

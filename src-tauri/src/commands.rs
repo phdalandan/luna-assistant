@@ -17,7 +17,7 @@ use crate::inference::{CloudClient, Engine, EngineStatus, ModelSpec, Warmup};
 use crate::listening::{self, VoiceStatus};
 use crate::models::{CloudProvider, ModelInfo, ModelManager, VoiceModelsInfo, catalog};
 use crate::settings::{self, InferenceMode, Settings};
-use crate::voice::Voice;
+use crate::voice::{self, MicrophoneOption, Voice};
 
 const VISIBLE_HISTORY: usize = 30;
 
@@ -322,13 +322,14 @@ pub fn save_settings(
         let engine = state.engine.clone();
         tauri::async_runtime::spawn(async move { engine.unload().await });
     }
-    let voice_changed =
-        settings.wake_word != previous.wake_word || settings.voice != previous.voice;
+    let voice_changed = settings.wake_word != previous.wake_word
+        || settings.voice != previous.voice
+        || settings.microphone != previous.microphone;
     if voice_changed && settings.listening {
-        // Listening restarts with the new wake word or voice, away from the main thread.
+        // Listening restarts with the new choices, away from the main thread.
         tauri::async_runtime::spawn_blocking(move || {
             if let Err(error) = listening::start(&app) {
-                log::warn!("listening did not restart with the new wake word: {error}");
+                log::warn!("listening did not restart with the new voice settings: {error}");
             }
         });
     }
@@ -638,6 +639,15 @@ pub fn list_voices() -> Vec<VoiceOption> {
             accent: voice.accent.clone(),
         })
         .collect()
+}
+
+/// Lists microphones away from the main thread, since audio systems can be slow to answer.
+#[tauri::command]
+pub async fn list_microphones() -> Result<Vec<MicrophoneOption>, CommandError> {
+    let listed = tauri::async_runtime::spawn_blocking(voice::microphones)
+        .await
+        .map_err(|error| AppError::Microphones(error.to_string()))?;
+    Ok(listed.map_err(|error| AppError::Microphones(error.to_string()))?)
 }
 
 #[tauri::command]

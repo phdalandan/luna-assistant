@@ -22,6 +22,7 @@ pub fn show_main_window(app: &AppHandle) {
         log::error!("main window is missing");
         return;
     };
+    set_dock_visible(app, true);
     let result = window
         .show()
         .and_then(|()| window.unminimize())
@@ -33,15 +34,27 @@ pub fn show_main_window(app: &AppHandle) {
 }
 
 /// Closing the window keeps Luna running in the tray. Quit is in the tray menu.
+/// A hidden window has no taskbar button on Windows; on macOS the Dock icon is removed too.
 pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     if let WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
         if let Err(error) = window.hide() {
             log::error!("failed to hide main window: {error}");
         }
+        set_dock_visible(window.app_handle(), false);
         window.state::<AppState>().set_window_visible(false);
     }
 }
+
+#[cfg(target_os = "macos")]
+pub fn set_dock_visible(app: &AppHandle, visible: bool) {
+    if let Err(error) = app.set_dock_visibility(visible) {
+        log::error!("failed to change Dock visibility: {error}");
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn set_dock_visible(_: &AppHandle, _: bool) {}
 
 /// The tray's listening item, kept so it can follow changes made in the window.
 struct ListeningItem(CheckMenuItem<Wry>);

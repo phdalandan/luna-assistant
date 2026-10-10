@@ -1,10 +1,10 @@
 # Luna
 
-Luna is an open-source, privacy-first voice assistant for [Home Assistant](https://www.home-assistant.io/). By default it runs entirely on your computer: speech recognition, wake word detection, and language understanding never leave your machine. You can choose a cloud model from OpenAI or Anthropic instead.
+Luna is an open-source, privacy-first voice assistant for [Home Assistant](https://www.home-assistant.io/). Luna runs locally by default: wake phrase detection, speech recognition, language understanding, and speech output all happen on your computer. You can choose cloud processing instead, separately for the AI model (OpenAI or Anthropic) and for speech recognition (OpenAI). The wake phrase is always detected locally.
 
 Say "It's too bright in the living room" or "Turn off everything downstairs except the hallway light" and Luna works out which devices you mean, checks the action is allowed, carries it out, and confirms the result.
 
-> **Status:** early development. The text assistant works with Home Assistant and a built-in local AI engine. Voice is not implemented yet.
+> **Status:** early development. Typed and spoken requests work with Home Assistant, using the built-in local AI engine or a cloud provider. Voice has been tested on Windows; macOS voice is still being tested.
 
 ## Requirements
 
@@ -12,6 +12,8 @@ Say "It's too bright in the living room" or "Turn off everything downstairs exce
 - 16 GB of memory
 - About 6 GB of free disk space for the recommended model
 - Home Assistant 2024.4 or later on your network
+- A microphone and speakers for voice
+- An OpenAI or Anthropic API key, only if you choose Cloud
 
 Nothing else needs to be installed. Luna includes its own AI engine ([llama.cpp](https://github.com/ggml-org/llama.cpp)).
 
@@ -28,8 +30,9 @@ Development builds are unsigned:
 
 1. Open Luna from the tray or menu bar.
 2. Download the recommended model (Qwen3 8B, 5.0 GB). Nothing downloads until you choose to.
-3. Select **Use** once it is installed.
+3. Select **Use** once it is installed. To use a cloud model instead, choose **Cloud** under **Settings → AI Models** and add your API key.
 4. In **Settings**, pick your Home Assistant instance (found automatically on your network) or enter its address, then paste a [long-lived access token](https://www.home-assistant.io/docs/authentication/#your-account-profile).
+5. For voice, download the speech models under **Settings → Speech**, pick a microphone under **Settings → Microphone**, then turn on the microphone switch at the top right. Say "Luna" (or your own wake phrase) followed by a request.
 
 ## AI models
 
@@ -44,9 +47,11 @@ The model loads when you first ask something and unloads after 5 minutes of inac
 
 ## Privacy
 
+Luna works offline with Local selected for both the AI model and speech recognition. Choosing Cloud for either sends data to that provider, as described below.
+
 With Local selected (the default), requests, Home Assistant data, and AI processing stay on your computer, and Luna connects to the internet only to download a model you chose. With Cloud selected, the text of a request and the home data needed to interpret it (room and floor names, relevant devices and their states, and the last few turns of the conversation) are sent to the provider you chose. Luna still controls Home Assistant itself; the provider never connects to it. Audio stays on your computer unless you also choose Cloud for speech recognition: then what you say after the wake word is sent to OpenAI for transcription. The wake word is always detected locally. The Home Assistant token and API keys are stored in the macOS Keychain or Windows Credential Manager.
 
-Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tray menu to exit.
+Closing the window keeps Luna running in the tray or menu bar and removes it from the taskbar or Dock. Use **Quit Luna** from the tray menu to exit.
 
 ## Development
 

@@ -2,7 +2,7 @@ import { clearMocks } from "@tauri-apps/api/mocks";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { mockBackend, model } from "../test/backend";
-import { ModelList } from "./ModelList";
+import { ModelList, ModelPicker } from "./ModelList";
 
 describe("ModelList", () => {
   afterEach(() => {
@@ -103,5 +103,25 @@ describe("ModelList", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Switch to another model before deleting this one.",
     );
+  });
+
+  it("picks a model from a dropdown and shows its details below", () => {
+    mockBackend();
+    const models = [
+      model({ installed: true, active: true }),
+      model({ id: "gemma-3-12b", name: "Gemma 3 12B", recommended: false }),
+    ];
+    render(
+      <ModelPicker
+        models={models}
+        engine={{ state: "ready", model: "qwen3-8b" }}
+      />,
+    );
+    const picker = screen.getByLabelText("Model") as HTMLSelectElement;
+    expect(picker.value).toBe("qwen3-8b");
+    expect(screen.getByText("Active ✓")).toBeTruthy();
+    fireEvent.change(picker, { target: { value: "gemma-3-12b" } });
+    expect(screen.queryByText("Active ✓")).toBeNull();
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   });
 });

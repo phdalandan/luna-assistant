@@ -94,7 +94,9 @@ pub fn run() {
 
             lifecycle::setup_tray(app)?;
             resume_listening(app.handle());
-            if !lifecycle::starts_hidden(std::env::args()) {
+            if lifecycle::starts_hidden(std::env::args()) {
+                lifecycle::set_dock_visible(app.handle(), false);
+            } else {
                 lifecycle::show_main_window(app.handle());
             }
             Ok(())
@@ -127,6 +129,7 @@ pub fn run() {
             commands::set_launch_at_login,
             commands::set_listening,
             commands::list_voices,
+            commands::list_microphones,
             commands::get_voice_models,
             commands::download_voice_models,
             commands::cancel_voice_download,

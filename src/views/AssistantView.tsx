@@ -7,7 +7,6 @@ import {
   events,
   type Interaction,
   type Status,
-  type VoiceState,
 } from "../lib/api";
 import { formatTime } from "../lib/format";
 import { useEvent, useModels, useStatus } from "../lib/hooks";
@@ -66,11 +65,6 @@ export function AssistantView() {
       <Countdown endsAt={status?.conversationEndsAt ?? null} />
     </header>
   );
-  // Failures are shown through the voice status, so they are not repeated here.
-  const toggleListening = () =>
-    api
-      .setListening(voice === "off")
-      .catch((err: unknown) => console.error(err));
   const problem = status?.voice.problem && (
     <p className="detail" role="status">
       {status.voice.problem}
@@ -175,7 +169,6 @@ export function AssistantView() {
         <div ref={end} />
       </div>
 
-      <MicToggle voice={voice} toggle={toggleListening} />
       <form className="composer" onSubmit={submit}>
         <input
           className="input"
@@ -199,40 +192,6 @@ export function AssistantView() {
         )}
       </form>
     </section>
-  );
-}
-
-const VOICE_LABELS: Record<VoiceState, string> = {
-  off: "Microphone off",
-  listening: "Listening",
-  processing: "Processing",
-  responding: "Responding",
-};
-
-/** Turns listening on or off and shows what voice is doing. */
-function MicToggle({
-  voice,
-  toggle,
-}: {
-  voice: VoiceState;
-  toggle: () => void;
-}) {
-  const on = voice !== "off";
-  return (
-    <button
-      className="mic-toggle"
-      type="button"
-      data-state={voice}
-      aria-pressed={on}
-      onClick={toggle}
-    >
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="9" y="3" width="6" height="11" rx="3" />
-        <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
-        {!on && <path d="M4 4l16 16" />}
-      </svg>
-      {VOICE_LABELS[voice]}
-    </button>
   );
 }
 
