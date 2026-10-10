@@ -77,7 +77,7 @@ jobs:
     needs: [prepare, checks]
     runs-on: ${{ matrix.runner }}
     strategy:
-      fail-fast: true
+      fail-fast: false
       matrix:
         include:
           - name: macOS
