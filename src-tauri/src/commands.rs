@@ -27,6 +27,8 @@ pub struct AppState {
     session: Session,
     pub voice: Voice,
     voice_status: Mutex<VoiceStatus>,
+    /// When the conversation will be cleared if nothing else is asked, in Unix milliseconds.
+    conversation_ends_at: Mutex<Option<i64>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -36,6 +38,9 @@ pub struct Status {
     pub home_assistant: ConnectionStatus,
     pub engine: EngineStatus,
     pub voice: VoiceStatus,
+    /// When the conversation resets, in Unix milliseconds, or `None` when there is none.
+    #[cfg_attr(test, ts(type = "number | null"))]
+    pub conversation_ends_at: Option<i64>,
 }
 
 impl AppState {
@@ -48,6 +53,7 @@ impl AppState {
             session: Session::default(),
             voice: Voice::default(),
             voice_status: Mutex::default(),
+            conversation_ends_at: Mutex::default(),
         }
     }
 
@@ -65,6 +71,7 @@ impl AppState {
             home_assistant: self.home_assistant.status(),
             engine: self.engine.status(),
             voice: lock(&self.voice_status).clone(),
+            conversation_ends_at: *lock(&self.conversation_ends_at),
         }
     }
 
@@ -337,6 +344,8 @@ pub async fn ask(
 /// Clears the conversation once no request follows within `CONVERSATION_LIFETIME`.
 fn end_conversation_when_idle(app: &AppHandle) {
     let activity = app.state::<AppState>().session.touch();
+    let ends_at = history::now_millis() + CONVERSATION_LIFETIME.as_millis() as i64;
+    set_conversation_end(app, Some(ends_at));
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         tokio::time::sleep(CONVERSATION_LIFETIME).await;
@@ -345,11 +354,18 @@ fn end_conversation_when_idle(app: &AppHandle) {
             return;
         }
         state.session.forget();
+        set_conversation_end(&app, None);
         match history::clear(&state.db()) {
             Ok(()) => crate::emit(&app, crate::CONVERSATION_EVENT, ()),
             Err(error) => log::error!("failed to clear the conversation: {error}"),
         }
     });
+}
+
+fn set_conversation_end(app: &AppHandle, ends_at: Option<i64>) {
+    let state = app.state::<AppState>();
+    *lock(&state.conversation_ends_at) = ends_at;
+    crate::emit(app, crate::STATUS_EVENT, state.status());
 }
 
 #[tauri::command]
@@ -373,8 +389,9 @@ pub fn list_interactions(state: State<'_, AppState>) -> Result<Vec<Interaction>,
 }
 
 #[tauri::command]
-pub fn clear_history(state: State<'_, AppState>) -> Result<(), CommandError> {
+pub fn clear_history(app: AppHandle, state: State<'_, AppState>) -> Result<(), CommandError> {
     state.session.forget();
+    set_conversation_end(&app, None);
     Ok(history::clear(&state.db())?)
 }
 
@@ -401,8 +418,8 @@ pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<bool, Comman
 }
 
 #[tauri::command]
-pub fn set_listening(app: AppHandle, enabled: bool) -> Result<(), CommandError> {
-    Ok(listening::set_enabled(&app, enabled)?)
+pub async fn set_listening(app: AppHandle, enabled: bool) -> Result<(), CommandError> {
+    Ok(listening::set_enabled_in_background(app, enabled).await?)
 }
 
 #[tauri::command]

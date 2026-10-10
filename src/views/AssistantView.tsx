@@ -61,6 +61,7 @@ export function AssistantView() {
   const voice = status?.voice.state ?? "off";
   const header = (
     <Header
+      endsAt={status?.conversationEndsAt ?? null}
       voice={voice}
       toggle={() =>
         api
@@ -214,10 +215,16 @@ const VOICE_LABELS: Record<VoiceState, string> = {
   responding: "Responding",
 };
 
-function Header({ voice, toggle }: { voice: VoiceState; toggle: () => void }) {
+interface HeaderProps {
+  endsAt: number | null;
+  voice: VoiceState;
+  toggle: () => void;
+}
+
+function Header({ endsAt, voice, toggle }: HeaderProps) {
   return (
     <header className="assistant-header">
-      <h1>Luna</h1>
+      <Countdown endsAt={endsAt} />
       <button
         className="chip"
         type="button"
@@ -228,6 +235,33 @@ function Header({ voice, toggle }: { voice: VoiceState; toggle: () => void }) {
         {VOICE_LABELS[voice]}
       </button>
     </header>
+  );
+}
+
+/** Time left before the conversation is cleared, counted down each second. */
+function Countdown({ endsAt }: { endsAt: number | null }) {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    if (endsAt === null) return;
+    const tick = () => setNow(Date.now());
+    const first = window.setTimeout(tick, 0);
+    const timer = window.setInterval(tick, 1000);
+    return () => {
+      window.clearTimeout(first);
+      window.clearInterval(timer);
+    };
+  }, [endsAt]);
+
+  const seconds = endsAt === null ? 0 : Math.ceil((endsAt - now) / 1000);
+  if (seconds <= 0) {
+    return <span />;
+  }
+  const minutes = Math.floor(seconds / 60);
+  const rest = String(seconds % 60).padStart(2, "0");
+  return (
+    <span className="countdown">
+      Conversation resets in {minutes}:{rest}
+    </span>
   );
 }
 

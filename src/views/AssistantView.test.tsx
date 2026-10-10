@@ -143,4 +143,17 @@ describe("AssistantView", () => {
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Microphone off" })).toBeTruthy();
   });
+
+  it("counts down to when the conversation resets", async () => {
+    mockBackend({
+      list_models: active,
+      get_status: () => ({
+        ...status,
+        conversationEndsAt: Date.now() + 90_500,
+      }),
+    });
+    render(<AssistantView />);
+    expect(await screen.findByText("Conversation resets in 1:31")).toBeTruthy();
+    expect(screen.queryByRole("heading", { name: "Luna" })).toBeNull();
+  });
 });

@@ -94,12 +94,14 @@ fn open(sink: impl AudioSink) -> Result<(cpal::Stream, u32), CaptureError> {
     let sink = std::sync::Arc::new(sink);
     let on_error = {
         let sink = sink.clone();
-        move |error: cpal::Error| {
-            log::warn!("microphone error: {error}");
-            match error.kind() {
-                // Reported when audio follows a new default device; capture continues.
-                ErrorKind::DeviceChanged | ErrorKind::Xrun | ErrorKind::RealtimeDenied => {}
-                _ => sink.lost(CaptureError::from(&error)),
+        move |error: cpal::Error| match error.kind() {
+            // Capture continues after these, for example when audio follows a new default device.
+            ErrorKind::DeviceChanged | ErrorKind::Xrun | ErrorKind::RealtimeDenied => {
+                log::debug!("microphone: {error}");
+            }
+            _ => {
+                log::warn!("microphone error: {error}");
+                sink.lost(CaptureError::from(&error));
             }
         }
     };

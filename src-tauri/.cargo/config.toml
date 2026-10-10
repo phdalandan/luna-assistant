@@ -6,10 +6,13 @@ GGML_AVX = "ON"
 GGML_AVX2 = "ON"
 GGML_FMA = "ON"
 GGML_F16C = "ON"
-# The cmake crate drops optimisation from release flags with the Visual Studio generator.
+# The cmake crate drops optimisation from these flags with the Visual Studio generator.
 # Both options are valid for MSVC and clang.
 CMAKE_C_FLAGS_RELEASE = "-O2 -DNDEBUG"
 CMAKE_CXX_FLAGS_RELEASE = "-O2 -DNDEBUG"
+# Debug builds of Luna use RelWithDebInfo for whisper.cpp, which has the same problem.
+CMAKE_C_FLAGS_RELWITHDEBINFO = "-O2 -DNDEBUG"
+CMAKE_CXX_FLAGS_RELWITHDEBINFO = "-O2 -DNDEBUG"
 
 # sherpa-onnx without its own speech synthesis (which links GPL-licensed espeak-ng), from the
 # pinned, checksum-verified archives `npm run runtime` extracts. Replaces sherpa-onnx-sys's

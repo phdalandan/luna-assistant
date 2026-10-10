@@ -33,6 +33,7 @@ struct FrontendEvents(AppHandle);
 
 impl ModelEvents for FrontendEvents {
     fn changed(&self) {
+        listening::models_changed(&self.0);
         emit(&self.0, MODELS_EVENT, ());
     }
 
@@ -163,9 +164,15 @@ fn resume_listening(app: &AppHandle) {
         .state::<AppState>()
         .settings()
         .is_ok_and(|settings| settings.listening);
-    if enabled && let Err(error) = listening::start(app) {
-        log::warn!("listening did not resume: {error}");
+    if !enabled {
+        return;
     }
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(error) = listening::start(&app) {
+            log::warn!("listening did not resume: {error}");
+        }
+    });
 }
 
 /// Sends connection and model status changes to the frontend as they happen.

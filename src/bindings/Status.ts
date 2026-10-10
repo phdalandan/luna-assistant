@@ -3,4 +3,8 @@ import type { ConnectionStatus } from "./ConnectionStatus";
 import type { EngineStatus } from "./EngineStatus";
 import type { VoiceStatus } from "./VoiceStatus";
 
-export type Status = { homeAssistant: ConnectionStatus, engine: EngineStatus, voice: VoiceStatus, };
+export type Status = { homeAssistant: ConnectionStatus, engine: EngineStatus, voice: VoiceStatus, 
+/**
+ * When the conversation resets, in Unix milliseconds, or `None` when there is none.
+ */
+conversationEndsAt: number | null, };

@@ -115,8 +115,30 @@ impl Host for VoiceHost {
     }
 }
 
-/// Turns listening on or off from the window or tray and remembers the choice.
-pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+/// Starting and stopping wait for the voice thread, which reports to the main thread, so this
+/// never runs on the main thread.
+pub async fn set_enabled_in_background(app: AppHandle, enabled: bool) -> Result<(), AppError> {
+    tauri::async_runtime::spawn_blocking(move || set_enabled(&app, enabled))
+        .await
+        .unwrap_or_else(|error| {
+            log::error!("listening change did not finish: {error}");
+            Err(AppError::Voice(VoiceError::Capture(CaptureError::Failed)))
+        })
+}
+
+/// Clears "download the voice models first" once they are installed.
+pub fn models_changed(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    let missing = AppError::VoiceModelsMissing.user_message();
+    let status = state.status().voice;
+    if status.problem.as_deref() == Some(missing.as_str()) && state.models.voice().files().is_some()
+    {
+        set_status(app, status.state, None);
+    }
+}
+
+/// Turns listening on or off and remembers the choice.
+fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     let result = if enabled {
         start(app)

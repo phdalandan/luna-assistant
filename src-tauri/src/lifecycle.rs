@@ -61,9 +61,13 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
             MENU_OPEN => show_main_window(app),
             MENU_LISTENING => {
                 let enabled = app.state::<ListeningItem>().0.is_checked().unwrap_or(false);
-                if crate::listening::set_enabled(app, enabled).is_err() {
-                    show_main_window(app);
-                }
+                let app = app.clone();
+                tauri::async_runtime::spawn(async move {
+                    let result = crate::listening::set_enabled_in_background(app.clone(), enabled);
+                    if result.await.is_err() {
+                        show_main_window(&app);
+                    }
+                });
             }
             MENU_QUIT => app.exit(0),
             _ => {}
@@ -82,11 +86,18 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
     Ok(())
 }
 
-/// Keeps the tray's listening check mark in step with the actual state.
+/// Keeps the tray's listening check mark in step with the actual state. Menus change on the
+/// main thread; this never waits for it, so the voice thread cannot block on it.
 pub fn show_listening(app: &AppHandle, on: bool) {
-    if let Some(item) = app.try_state::<ListeningItem>()
-        && let Err(error) = item.0.set_checked(on)
-    {
+    let handle = app.clone();
+    let result = app.run_on_main_thread(move || {
+        if let Some(item) = handle.try_state::<ListeningItem>()
+            && let Err(error) = item.0.set_checked(on)
+        {
+            log::error!("failed to update the tray menu: {error}");
+        }
+    });
+    if let Err(error) = result {
         log::error!("failed to update the tray menu: {error}");
     }
 }

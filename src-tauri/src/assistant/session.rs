@@ -10,7 +10,7 @@ use crate::home_assistant::model::Entity;
 
 const CONFIRMATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// A conversation ends after this long without a request. Device states are cached separately.
-pub const CONVERSATION_LIFETIME: Duration = Duration::from_secs(5 * 60);
+pub const CONVERSATION_LIFETIME: Duration = Duration::from_secs(2 * 60);
 pub const MAX_REFERENCED: usize = 10;
 
 /// What the conversation is about, kept in Rust rather than inferred from chat text.

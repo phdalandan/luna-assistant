@@ -13,6 +13,7 @@ export const status: Status = {
   homeAssistant: "connected",
   engine: { state: "idle" },
   voice: { state: "off", problem: null },
+  conversationEndsAt: null,
 };
 
 export function model(overrides: Partial<ModelInfo> = {}): ModelInfo {
