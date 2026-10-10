@@ -2,7 +2,7 @@
 //! Each file is verified against its catalogue SHA-256 before it counts as installed.
 use std::fs::{self, File};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -10,7 +10,7 @@ use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
 use super::download::{self, DownloadError};
-use super::speech::{KeywordModel, SpeechCatalog};
+use super::speech::{DownloadFile, SpeechCatalog};
 use super::store::ModelStore;
 use super::{
     DownloadPhase, DownloadProgress, DownloadStatus, ModelEvents, PROGRESS_INTERVAL,
@@ -21,6 +21,9 @@ use crate::voice::SpeechFiles;
 /// The progress event id for the voice download.
 const VOICE_DOWNLOAD_ID: &str = "voice";
 const WAKE_WORD_DIR: &str = "wake-word";
+const SPEECH_OUTPUT_DIR: &str = "speech-output";
+/// Records which verified archive a folder was extracted from; the archive is then deleted.
+const EXTRACTED_MARKER: &str = "extracted";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -30,6 +33,14 @@ pub struct VoiceModelsInfo {
     #[cfg_attr(test, ts(type = "number"))]
     pub size: u64,
     pub download: Option<DownloadStatus>,
+}
+
+/// An archive and the files and folders taken from it.
+struct Unpack<'a> {
+    archive: &'a DownloadFile,
+    dir: PathBuf,
+    files: Vec<&'a str>,
+    dirs: Vec<&'a str>,
 }
 
 enum Activity {
@@ -69,28 +80,59 @@ impl VoiceModels {
         self.speech.files().iter().map(|file| file.size).sum()
     }
 
-    fn wake_word_dir(&self) -> PathBuf {
-        self.store.dir().join(WAKE_WORD_DIR)
+    /// Files used as downloaded, as opposed to archives that are extracted.
+    fn plain_files(&self) -> [&DownloadFile; 2] {
+        [
+            &self.speech.speech_detection.file,
+            &self.speech.transcription.file,
+        ]
+    }
+
+    fn unpacks(&self) -> [Unpack<'_>; 2] {
+        let wake_word = &self.speech.wake_word;
+        let output = &self.speech.speech_output;
+        [
+            Unpack {
+                archive: &wake_word.archive,
+                dir: self.store.dir().join(WAKE_WORD_DIR),
+                files: wake_word.extracted_files().to_vec(),
+                dirs: Vec::new(),
+            },
+            Unpack {
+                archive: &output.archive,
+                dir: self.store.dir().join(SPEECH_OUTPUT_DIR),
+                files: output.extracted_files(),
+                dirs: vec![&output.data_dir],
+            },
+        ]
+    }
+
+    fn is_unpacked(unpack: &Unpack<'_>) -> bool {
+        let marker = fs::read_to_string(unpack.dir.join(EXTRACTED_MARKER));
+        marker.is_ok_and(|sha| sha.trim() == unpack.archive.sha256)
+            && unpack
+                .files
+                .iter()
+                .all(|name| unpack.dir.join(name).is_file())
+            && unpack
+                .dirs
+                .iter()
+                .all(|name| unpack.dir.join(name).is_dir())
     }
 
     /// The installed model files, or `None` until the user has downloaded them.
     pub fn files(&self) -> Option<SpeechFiles> {
         let verified = self
-            .speech
-            .files()
+            .plain_files()
             .iter()
             .all(|file| self.store.is_installed(*file));
-        let wake_word_dir = self.wake_word_dir();
-        let extracted = self
-            .speech
-            .wake_word
-            .extracted_files()
-            .iter()
-            .all(|name| wake_word_dir.join(name).is_file());
-        (verified && extracted).then(|| SpeechFiles {
-            wake_word_dir,
+        let [wake_word, speech_output] = self.unpacks();
+        let unpacked = Self::is_unpacked(&wake_word) && Self::is_unpacked(&speech_output);
+        (verified && unpacked).then(|| SpeechFiles {
+            wake_word_dir: wake_word.dir,
             speech_detection: self.store.model_path(&self.speech.speech_detection.file),
             transcription: self.store.model_path(&self.speech.transcription.file),
+            speech_output_dir: speech_output.dir,
         })
     }
 
@@ -162,60 +204,139 @@ impl VoiceModels {
 
     async fn download_all(&self, stop: &CancellationToken) -> Result<(), DownloadError> {
         let mut finished = 0;
-        let mut last_report = Instant::now();
-        for file in self.speech.files() {
-            download::download(&self.http, file, &self.store, stop, |downloaded| {
-                let total = finished + downloaded;
-                if let Activity::Running { downloaded, .. } = &mut *lock(&self.activity) {
-                    *downloaded = total;
-                }
-                if last_report.elapsed() >= PROGRESS_INTERVAL {
-                    last_report = Instant::now();
-                    self.events.progress(DownloadProgress {
-                        id: VOICE_DOWNLOAD_ID.into(),
-                        downloaded: total,
-                    });
-                }
-            })
-            .await?;
+        for file in self.plain_files() {
+            self.download(file, finished, stop).await?;
             finished += file.size;
         }
-        let archive = self.store.model_path(&self.speech.wake_word.archive);
-        let target = self.wake_word_dir();
-        let wake_word = &self.speech.wake_word;
-        tauri::async_runtime::spawn_blocking({
-            let wake_word = wake_word.clone();
-            move || extract(&archive, &target, &wake_word)
+        for unpack in self.unpacks() {
+            if !Self::is_unpacked(&unpack) {
+                self.download(unpack.archive, finished, stop).await?;
+                let archive = self.store.model_path(unpack.archive);
+                let (dir, sha) = (unpack.dir.clone(), unpack.archive.sha256.clone());
+                let files: Vec<String> =
+                    unpack.files.iter().map(|name| (*name).to_owned()).collect();
+                let dirs: Vec<String> = unpack.dirs.iter().map(|name| (*name).to_owned()).collect();
+                tauri::async_runtime::spawn_blocking(move || {
+                    extract(&archive, &dir, &files, &dirs)?;
+                    fs::write(dir.join(EXTRACTED_MARKER), sha)
+                        .map_err(|error| DownloadError::Io(error.to_string()))
+                })
+                .await
+                .map_err(|error| DownloadError::Io(error.to_string()))??;
+                self.store.delete(unpack.archive)?;
+            }
+            finished += unpack.archive.size;
+        }
+        self.remove_replaced_files();
+        Ok(())
+    }
+
+    async fn download(
+        &self,
+        file: &DownloadFile,
+        finished: u64,
+        stop: &CancellationToken,
+    ) -> Result<(), DownloadError> {
+        let mut last_report = Instant::now();
+        download::download(&self.http, file, &self.store, stop, |downloaded| {
+            let total = finished + downloaded;
+            if let Activity::Running { downloaded, .. } = &mut *lock(&self.activity) {
+                *downloaded = total;
+            }
+            if last_report.elapsed() >= PROGRESS_INTERVAL {
+                last_report = Instant::now();
+                self.events.progress(DownloadProgress {
+                    id: VOICE_DOWNLOAD_ID.into(),
+                    downloaded: total,
+                });
+            }
         })
         .await
-        .map_err(|error| DownloadError::Io(error.to_string()))??;
-        Ok(())
+    }
+
+    /// Deletes speech models an earlier catalogue used, such as a smaller transcription model.
+    fn remove_replaced_files(&self) {
+        let current: Vec<String> = self
+            .plain_files()
+            .iter()
+            .flat_map(|file| {
+                [
+                    file.file_name.clone(),
+                    format!("{}.verified", file.file_name),
+                ]
+            })
+            .collect();
+        let Ok(entries) = fs::read_dir(self.store.dir()) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let is_file = entry.file_type().is_ok_and(|kind| kind.is_file());
+            if is_file && !current.contains(&name) {
+                match fs::remove_file(entry.path()) {
+                    Ok(()) => log::info!("removed replaced speech model {name}"),
+                    Err(error) => log::warn!("could not remove {name}: {error}"),
+                }
+            }
+        }
     }
 }
 
-/// Copies the model files named in the catalogue out of the verified archive. Paths inside
-/// the archive are never used, only the file names the catalogue lists.
-fn extract(archive: &Path, target: &Path, model: &KeywordModel) -> Result<(), DownloadError> {
+/// Copies the listed files and folders out of a verified archive, below its top-level folder.
+/// Any other entry, and any path that could leave `target`, is skipped.
+fn extract(
+    archive: &Path,
+    target: &Path,
+    files: &[String],
+    dirs: &[String],
+) -> Result<(), DownloadError> {
+    if target.exists() {
+        fs::remove_dir_all(target)?;
+    }
     fs::create_dir_all(target)?;
-    let wanted = model.extracted_files();
     let reader = bzip2::read::BzDecoder::new(File::open(archive)?);
     let mut entries = tar::Archive::new(reader);
-    let mut found = 0;
+    let mut found_files = 0;
+    let mut found_dirs = vec![false; dirs.len()];
     for entry in entries.entries()? {
         let mut entry = entry?;
-        let path = entry.path()?.into_owned();
-        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
-            continue;
-        };
-        if !entry.header().entry_type().is_file() || !wanted.contains(&name) {
+        if !entry.header().entry_type().is_file() {
             continue;
         }
-        let partial = target.join(format!("{name}.part"));
+        let path = entry.path()?.into_owned();
+        let mut parts = Vec::new();
+        for component in path.components().skip(1) {
+            let Component::Normal(part) = component else {
+                parts.clear();
+                break;
+            };
+            parts.push(part.to_string_lossy().into_owned());
+        }
+        let relative = parts.join("/");
+        let in_dir = dirs
+            .iter()
+            .position(|dir| relative.starts_with(&format!("{dir}/")));
+        let listed = files.contains(&relative);
+        if relative.is_empty() || !(listed || in_dir.is_some()) {
+            continue;
+        }
+        let destination = parts
+            .iter()
+            .fold(target.to_path_buf(), |path, part| path.join(part));
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        let partial = destination.with_extension("part");
         io::copy(&mut entry, &mut File::create(&partial)?)?;
-        fs::rename(&partial, target.join(name))?;
-        found += 1;
+        fs::rename(&partial, &destination)?;
+        if listed {
+            found_files += 1;
+        }
+        if let Some(index) = in_dir {
+            found_dirs[index] = true;
+        }
     }
-    if found != wanted.len() {
+    if found_files != files.len() || found_dirs.contains(&false) {
         return Err(DownloadError::Verification);
     }
     Ok(())
@@ -224,7 +345,6 @@ fn extract(archive: &Path, target: &Path, model: &KeywordModel) -> Result<(), Do
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models::catalog;
 
     fn archive(dir: &Path, files: &[(&str, &[u8])]) -> PathBuf {
         let path = dir.join("model.tar.bz2");
@@ -235,8 +355,11 @@ mod tests {
             let mut header = tar::Header::new_gnu();
             header.set_size(content.len() as u64);
             header.set_mode(0o644);
+            header.set_entry_type(tar::EntryType::Regular);
+            // Written directly so test paths are not normalised by the tar crate.
+            header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name.as_bytes());
             header.set_cksum();
-            builder.append_data(&mut header, name, *content).unwrap();
+            builder.append(&header, *content).unwrap();
         }
         builder.into_inner().unwrap().finish().unwrap();
         path
@@ -249,44 +372,97 @@ mod tests {
         dir
     }
 
+    fn names(list: &[&str]) -> Vec<String> {
+        list.iter().map(|name| (*name).to_owned()).collect()
+    }
+
+    fn listing(dir: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in fs::read_dir(current).unwrap().flatten() {
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                } else {
+                    let relative = entry.path().strip_prefix(dir).unwrap().to_owned();
+                    found.push(relative.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
     #[test]
-    fn extracts_only_the_catalogue_files_by_name() {
-        let model = &catalog::speech().wake_word;
+    fn extracts_only_listed_files_and_folders() {
         let dir = temp_dir("extract");
-        let mut files: Vec<(String, &[u8])> = model
-            .extracted_files()
-            .iter()
-            .map(|name| (format!("model-dir/{name}"), b"model".as_slice()))
-            .collect();
-        files.push(("model-dir/test_wavs/0.wav".into(), b"audio"));
-        let named: Vec<(&str, &[u8])> = files.iter().map(|(n, c)| (n.as_str(), *c)).collect();
-        let archive = archive(&dir, &named);
-        let target = dir.join("wake-word");
-
-        extract(&archive, &target, model).unwrap();
-
-        let mut extracted: Vec<String> = fs::read_dir(&target)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
-            .collect();
-        extracted.sort();
-        let mut expected: Vec<String> = model
-            .extracted_files()
-            .iter()
-            .map(|name| (*name).to_owned())
-            .collect();
-        expected.sort();
-        assert_eq!(extracted, expected);
+        let archive = archive(
+            &dir,
+            &[
+                ("model-dir/model.onnx", b"model"),
+                ("model-dir/tokens.txt", b"tokens"),
+                ("model-dir/espeak-ng-data/en_dict", b"dict"),
+                ("model-dir/espeak-ng-data/voices/en", b"voice"),
+                ("model-dir/test_wavs/0.wav", b"audio"),
+                ("model-dir/lexicon-zh.txt", b"unused"),
+            ],
+        );
+        let target = dir.join("out");
+        extract(
+            &archive,
+            &target,
+            &names(&["model.onnx", "tokens.txt"]),
+            &names(&["espeak-ng-data"]),
+        )
+        .unwrap();
+        assert_eq!(
+            listing(&target),
+            [
+                "espeak-ng-data/en_dict",
+                "espeak-ng-data/voices/en",
+                "model.onnx",
+                "tokens.txt"
+            ]
+        );
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn an_archive_missing_a_model_file_is_rejected() {
-        let model = &catalog::speech().wake_word;
+    fn paths_that_leave_the_folder_are_never_written() {
+        let dir = temp_dir("traversal");
+        let archive = archive(
+            &dir,
+            &[
+                ("model-dir/model.onnx", b"model"),
+                ("model-dir/../escaped.txt", b"bad"),
+                ("model-dir/espeak-ng-data/../../escaped.txt", b"bad"),
+                ("model-dir/espeak-ng-data/en_dict", b"dict"),
+            ],
+        );
+        let target = dir.join("out");
+        extract(
+            &archive,
+            &target,
+            &names(&["model.onnx"]),
+            &names(&["espeak-ng-data"]),
+        )
+        .unwrap();
+        assert!(!dir.join("escaped.txt").exists());
+        assert_eq!(listing(&target), ["espeak-ng-data/en_dict", "model.onnx"]);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn an_archive_missing_a_listed_file_is_rejected() {
         let dir = temp_dir("incomplete");
         let archive = archive(&dir, &[("model-dir/tokens.txt", b"tokens")]);
         assert_eq!(
-            extract(&archive, &dir.join("wake-word"), model),
+            extract(
+                &archive,
+                &dir.join("out"),
+                &names(&["model.onnx", "tokens.txt"]),
+                &[]
+            ),
             Err(DownloadError::Verification)
         );
         fs::remove_dir_all(&dir).unwrap();

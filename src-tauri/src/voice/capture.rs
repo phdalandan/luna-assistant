@@ -1,6 +1,5 @@
-//! Microphone capture with CPAL. Audio is mixed to mono and handed over in memory only.
-//! The stream lives on its own thread because CPAL streams cannot move between threads on
-//! every platform. Dropping `Microphone` stops capture immediately.
+//! Microphone capture with CPAL, mixed to mono and kept in memory only. The stream has its own
+//! thread because CPAL streams cannot move between threads everywhere. Dropping it stops capture.
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 

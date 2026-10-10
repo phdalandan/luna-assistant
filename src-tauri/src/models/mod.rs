@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-pub use catalog::{CatalogModel, ChatOptions};
+pub use catalog::{CatalogModel, ChatOptions, CloudModel, CloudProvider};
 use download::DownloadError;
 pub use store::ModelStore;
 pub use voice::{VoiceModels, VoiceModelsInfo};

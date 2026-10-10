@@ -61,6 +61,38 @@
       }
     }
   ],
+  "cloud": [
+    {
+      "provider": "openai",
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "request": { "reasoning_effort": "none" }
+    },
+    {
+      "provider": "openai",
+      "id": "gpt-6-sol",
+      "name": "GPT-6 Sol",
+      "request": { "reasoning_effort": "none" }
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
+      "request": {
+        "thinking": { "type": "disabled" },
+        "output_config": { "effort": "low" }
+      }
+    },
+    {
+      "provider": "anthropic",
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet 5",
+      "request": {
+        "thinking": { "type": "disabled" },
+        "output_config": { "effort": "low" }
+      }
+    }
+  ],
   "speech": {
     "wake_word": {
       "archive": {
@@ -87,20 +119,100 @@
       },
       "license": "MIT",
       "threshold": 0.5,
-      "min_silence_seconds": 0.7,
+      "min_silence_seconds": 0.6,
       "min_speech_seconds": 0.25,
       "max_speech_seconds": 15.0,
       "window_size": 512
     },
     "transcription": {
       "file": {
-        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-base.en-q5_1.bin",
-        "file_name": "ggml-base.en-q5_1.bin",
-        "size": 59721011,
-        "sha256": "4baf70dd0d7c4247ba2b81fafd9c01005ac77c2f9ef064e00dcf195d0e2fdd2f"
+        "url": "https://huggingface.co/ggerganov/whisper.cpp/resolve/5359861c739e955e79d9a303bcbc70fb988958b1/ggml-small.en-q5_1.bin",
+        "file_name": "ggml-small.en-q5_1.bin",
+        "size": 190098681,
+        "sha256": "bfdff4894dcb76bbf647d56263ea2a96645423f1669176f4844a1bf8e478ad30"
       },
       "license": "MIT",
       "language": "en"
+    },
+    "speech_output": {
+      "archive": {
+        "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/tts-models/kokoro-multi-lang-v1_0.tar.bz2",
+        "file_name": "kokoro-multi-lang-v1_0.tar.bz2",
+        "size": 349906910,
+        "sha256": "c5f7e2d2caf082bc1d20fb70334a61d99d20b484500aad32e7cf84c128ea3298"
+      },
+      "license": "Apache-2.0",
+      "model": "model.onnx",
+      "voices_file": "voices.bin",
+      "tokens": "tokens.txt",
+      "data_dir": "espeak-ng-data",
+      "speed": 1.0,
+      "voices": [
+        {
+          "id": "af_heart",
+          "name": "Heart",
+          "accent": "US",
+          "speaker": 3,
+          "lexicon": "lexicon-us-en.txt",
+          "lang": "en-us"
+        },
+        {
+          "id": "af_bella",
+          "name": "Bella",
+          "accent": "US",
+          "speaker": 2,
+          "lexicon": "lexicon-us-en.txt",
+          "lang": "en-us"
+        },
+        {
+          "id": "af_nicole",
+          "name": "Nicole",
+          "accent": "US",
+          "speaker": 6,
+          "lexicon": "lexicon-us-en.txt",
+          "lang": "en-us"
+        },
+        {
+          "id": "am_michael",
+          "name": "Michael",
+          "accent": "US",
+          "speaker": 16,
+          "lexicon": "lexicon-us-en.txt",
+          "lang": "en-us"
+        },
+        {
+          "id": "am_fenrir",
+          "name": "Fenrir",
+          "accent": "US",
+          "speaker": 14,
+          "lexicon": "lexicon-us-en.txt",
+          "lang": "en-us"
+        },
+        {
+          "id": "bf_emma",
+          "name": "Emma",
+          "accent": "UK",
+          "speaker": 21,
+          "lexicon": "lexicon-gb-en.txt",
+          "lang": "en-gb"
+        },
+        {
+          "id": "bf_isabella",
+          "name": "Isabella",
+          "accent": "UK",
+          "speaker": 22,
+          "lexicon": "lexicon-gb-en.txt",
+          "lang": "en-gb"
+        },
+        {
+          "id": "bm_george",
+          "name": "George",
+          "accent": "UK",
+          "speaker": 26,
+          "lexicon": "lexicon-gb-en.txt",
+          "lang": "en-gb"
+        }
+      ]
     }
   }
 }

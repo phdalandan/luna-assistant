@@ -1,6 +1,5 @@
-//! Decides whether something said during a voice conversation, without Luna's name, is meant
-//! for Luna. Only clear signs count: a recognised request, or an action or question about "it"
-//! or a device or place in this home. Everything else is ignored.
+//! Whether speech without Luna's name, during a conversation, is meant for her: a recognised
+//! request, or an action or question about "it" or a device or place in this home.
 use super::route::{self, Intent, Subject};
 use crate::home_assistant::model::Home;
 

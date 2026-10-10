@@ -1,7 +1,8 @@
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use super::speech::{DownloadFile, SpeechCatalog};
 use super::store::Artifact;
@@ -58,10 +59,55 @@ pub struct ChatOptions {
     pub top_k: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+#[serde(rename_all = "lowercase")]
+pub enum CloudProvider {
+    OpenAi,
+    Anthropic,
+}
+
+impl CloudProvider {
+    pub const ALL: [Self; 2] = [Self::OpenAi, Self::Anthropic];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::OpenAi => "OpenAI",
+            Self::Anthropic => "Anthropic",
+        }
+    }
+}
+
+/// A cloud model Luna supports, with its verified API model ID.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudModel {
+    pub provider: CloudProvider,
+    pub id: String,
+    pub name: String,
+    /// Model-specific request fields, such as reasoning or thinking settings.
+    pub request: Map<String, Value>,
+}
+
+/// Request fields Luna sets itself, which a catalogue entry must never override.
+const RESERVED_REQUEST_FIELDS: [&str; 10] = [
+    "model",
+    "messages",
+    "system",
+    "tools",
+    "tool_choice",
+    "parallel_tool_calls",
+    "max_tokens",
+    "max_completion_tokens",
+    "store",
+    "stream",
+];
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Catalog {
     models: Vec<CatalogModel>,
+    cloud: Vec<CloudModel>,
     speech: SpeechCatalog,
 }
 
@@ -81,6 +127,10 @@ pub enum CatalogError {
     InvalidSize(String),
     #[error("exactly one model must be recommended")]
     Recommendation,
+    #[error("cloud model {0} is invalid")]
+    InvalidCloudModel(String),
+    #[error("every cloud provider needs at least one model")]
+    MissingCloudModels,
 }
 
 fn catalog() -> &'static Catalog {
@@ -94,6 +144,25 @@ pub fn models() -> &'static [CatalogModel] {
 
 pub fn speech() -> &'static SpeechCatalog {
     &catalog().speech
+}
+
+pub fn cloud_models() -> &'static [CloudModel] {
+    &catalog().cloud
+}
+
+pub fn cloud_model(provider: CloudProvider, id: &str) -> Option<&'static CloudModel> {
+    cloud_models()
+        .iter()
+        .find(|model| model.provider == provider && model.id == id)
+}
+
+/// The first listed model of each provider is its default.
+pub fn default_cloud_model(provider: CloudProvider) -> String {
+    cloud_models()
+        .iter()
+        .find(|model| model.provider == provider)
+        .map(|model| model.id.clone())
+        .expect("bundled catalogue lists a model for every provider")
 }
 
 #[cfg(test)]
@@ -127,6 +196,20 @@ fn parse(json: &str) -> Result<Catalog, CatalogError> {
             wake_word.archive.file_name.clone(),
         ));
     }
+    let output = &catalog.speech.speech_output;
+    let mut voice_ids = HashSet::new();
+    let safe_output = output.extracted_files().into_iter().all(safe_file_name)
+        && safe_file_name(&output.data_dir)
+        && !output.voices.is_empty()
+        && output
+            .voices
+            .iter()
+            .all(|voice| voice_ids.insert(voice.id.as_str()));
+    if !safe_output {
+        return Err(CatalogError::InvalidFileName(
+            output.archive.file_name.clone(),
+        ));
+    }
     if catalog
         .models
         .iter()
@@ -136,7 +219,31 @@ fn parse(json: &str) -> Result<Catalog, CatalogError> {
     {
         return Err(CatalogError::Recommendation);
     }
+    check_cloud_models(&catalog.cloud)?;
     Ok(catalog)
+}
+
+fn check_cloud_models(models: &[CloudModel]) -> Result<(), CatalogError> {
+    let mut ids = HashSet::new();
+    for model in models {
+        let valid = ids.insert((model.provider, model.id.as_str()))
+            && !model.id.is_empty()
+            && !model.name.is_empty()
+            && model
+                .request
+                .keys()
+                .all(|key| !RESERVED_REQUEST_FIELDS.contains(&key.as_str()));
+        if !valid {
+            return Err(CatalogError::InvalidCloudModel(model.id.clone()));
+        }
+    }
+    if CloudProvider::ALL
+        .iter()
+        .any(|provider| models.iter().all(|model| model.provider != *provider))
+    {
+        return Err(CatalogError::MissingCloudModels);
+    }
+    Ok(())
 }
 
 fn safe_file_name(name: &str) -> bool {
@@ -249,6 +356,45 @@ mod tests {
             catalog["speech"]["wake_word"]["tokens"] = json!("../tokens.txt");
         });
         assert!(matches!(result, Err(CatalogError::InvalidFileName(_))));
+    }
+
+    #[test]
+    fn cloud_models_use_verified_api_ids() {
+        let ids: Vec<_> = cloud_models()
+            .iter()
+            .map(|model| (model.provider, model.id.as_str()))
+            .collect();
+        assert_eq!(
+            ids,
+            [
+                (CloudProvider::OpenAi, "gpt-6-luna"),
+                (CloudProvider::OpenAi, "gpt-6-sol"),
+                (CloudProvider::Anthropic, "claude-haiku-5-5"),
+                (CloudProvider::Anthropic, "claude-sonnet-5"),
+            ]
+        );
+        assert_eq!(default_cloud_model(CloudProvider::OpenAi), "gpt-6-luna");
+        assert_eq!(
+            default_cloud_model(CloudProvider::Anthropic),
+            "claude-haiku-5-5"
+        );
+        assert!(cloud_model(CloudProvider::OpenAi, "claude-haiku-5-5").is_none());
+    }
+
+    #[test]
+    fn cloud_models_cannot_override_luna_request_fields() {
+        let result = catalog_with(|catalog| {
+            catalog["cloud"][0]["request"]["tools"] = json!([]);
+        });
+        assert_eq!(
+            result,
+            Err(CatalogError::InvalidCloudModel("gpt-6-luna".into()))
+        );
+        let result = catalog_with(|catalog| {
+            let cloud = catalog["cloud"].as_array_mut().unwrap();
+            cloud.retain(|model| model["provider"] != "anthropic");
+        });
+        assert_eq!(result, Err(CatalogError::MissingCloudModels));
     }
 
     #[test]

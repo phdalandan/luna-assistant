@@ -1,9 +1,8 @@
-//! The voice thread. It runs the wake word detector on every chunk of audio while passive and
-//! drives the conversation state machine when Luna is addressed. Everything it hears is kept in
-//! memory only, and only for as long as the current state needs it.
+//! The voice thread: spots the wake word while passive and drives the conversation when Luna is
+//! addressed. Audio stays in memory only for as long as the current state needs it.
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender};
 use std::time::{Duration, Instant};
 
 use sherpa_onnx::LinearResampler;
@@ -15,9 +14,12 @@ use super::keyword;
 use super::speak::Speaker;
 use super::transcribe::Transcriber;
 use super::wake::{Segment, SpeechDetector, WakeWord};
-use super::{Channels, Host, Input, SAMPLE_RATE, SpeechFiles, VoiceError, VoiceState};
+use super::{
+    Channels, Host, Input, SAMPLE_RATE, SpeechFiles, VoiceError, VoiceSettings, VoiceState,
+};
 use crate::assistant::Relevance;
 use crate::models::catalog;
+use crate::models::speech::Voice;
 
 /// Speech separated by a longer pause than this belongs to a different utterance.
 const UTTERANCE_GAP: usize = SAMPLE_RATE as usize;
@@ -27,11 +29,15 @@ const WAKE_SLACK: usize = SAMPLE_RATE as usize;
 const MAX_REPLY: Duration = Duration::from_secs(60);
 const NAME_ONLY_REPLY: &str = "Yes?";
 const NOT_UNDERSTOOD: &str = "Sorry, I didn't catch that.";
+const LEVEL_INTERVAL: Duration = Duration::from_millis(50);
+/// Normal speech reaches about this RMS; louder audio shows as the full level.
+const LOUD: f32 = 0.1;
 
 /// Models that only exist while Luna is being spoken to.
 struct Active {
     detector: SpeechDetector,
     transcriber: Transcriber,
+    speaker: Speaker,
     segments: Vec<Segment>,
     /// Where the wake word fired, in detector samples. `None` for follow-ups.
     wake_at: Option<usize>,
@@ -46,25 +52,27 @@ enum Interpretation {
 
 pub struct Listener {
     files: SpeechFiles,
-    wake_word: String,
+    settings: VoiceSettings,
+    voice: Voice,
     host: Arc<dyn Host>,
     input: Receiver<Input>,
+    sender: SyncSender<Input>,
     accepting: Arc<AtomicBool>,
     stop_requested: Arc<AtomicBool>,
     conversation: Conversation,
     wake: WakeWord,
     preroll: RollingBuffer,
     resampler: Option<LinearResampler>,
-    speaker: Speaker,
     active: Option<Active>,
     reported: VoiceState,
+    level_reported: Instant,
     stopping: bool,
 }
 
 impl Listener {
     pub fn new(
         files: SpeechFiles,
-        wake_word: String,
+        settings: VoiceSettings,
         timing: Timing,
         sample_rate: u32,
         host: Arc<dyn Host>,
@@ -82,7 +90,13 @@ impl Listener {
                 log::error!("could not read the wake word vocabulary: {error}");
                 VoiceError::ModelLoad("wake word")
             })?;
-        let line = keyword::keyword_line(&vocabulary, &wake_word).ok_or(VoiceError::WakeWord)?;
+        let line =
+            keyword::keyword_line(&vocabulary, &settings.wake_word).ok_or(VoiceError::WakeWord)?;
+        let voice = catalog::speech()
+            .speech_output
+            .voice(&settings.voice)
+            .ok_or(VoiceError::Speech)?
+            .clone();
         let wake = WakeWord::load(&files.wake_word_dir, model, &line)?;
         let resampler = if sample_rate == SAMPLE_RATE {
             None
@@ -92,25 +106,24 @@ impl Listener {
                     .ok_or(VoiceError::Capture(super::CaptureError::Failed))?,
             )
         };
-        let speaker = Speaker::new(move || {
-            let _ = sender.send(Input::SpeechFinished);
-        })?;
         let preroll_samples = (timing.preroll.as_secs_f32() * SAMPLE_RATE as f32) as usize;
         host.state_changed(VoiceState::Listening);
         Ok(Self {
             files,
-            wake_word,
+            settings,
+            voice,
             host,
             input,
+            sender,
             accepting,
             stop_requested,
             conversation: Conversation::new(timing),
             wake,
             preroll: RollingBuffer::new(preroll_samples),
             resampler,
-            speaker,
             active: None,
             reported: VoiceState::Listening,
+            level_reported: Instant::now(),
             stopping: false,
         })
     }
@@ -147,6 +160,13 @@ impl Listener {
             Some(resampler) => resampler.resample(samples, false),
             None => samples.to_vec(),
         };
+        if self.level_reported.elapsed() >= LEVEL_INTERVAL && !audio.is_empty() {
+            self.level_reported = Instant::now();
+            let rms = (audio.iter().map(|sample| sample * sample).sum::<f32>()
+                / audio.len() as f32)
+                .sqrt();
+            self.host.audio_level((rms / LOUD).min(1.0));
+        }
         if self.conversation.state() == State::Passive {
             self.preroll.push(&audio);
             if self.wake.hears(&audio) && self.conversation.wake(Instant::now()) {
@@ -163,33 +183,51 @@ impl Listener {
         self.advance();
     }
 
-    /// Loads speech detection and transcription and replays the audio from before the wake word.
+    /// Loads the conversation's models and replays the audio from before the wake word. The voice
+    /// helper starts loading now, while the user is still speaking.
     fn begin_listening(&mut self) {
-        let speech = catalog::speech();
-        let loaded = SpeechDetector::load(&self.files.speech_detection, &speech.speech_detection)
-            .and_then(|detector| {
-                let transcriber =
-                    Transcriber::load(&self.files.transcription, &speech.transcription)?;
-                Ok((detector, transcriber))
-            });
-        let (mut detector, transcriber) = match loaded {
-            Ok(models) => models,
+        let active = match self.load_conversation_models() {
+            Ok(active) => active,
             Err(error) => {
                 log::error!("could not start listening for a request: {error}");
-                self.conversation.end();
-                self.release();
+                self.host.stopped(error);
+                self.stopping = true;
                 return;
             }
         };
-        let preroll = self.preroll.take();
-        let segments = detector.accept(&preroll);
-        self.active = Some(Active {
+        self.active = Some(active);
+        if let Some(active) = self.active.as_mut() {
+            let preroll = self.preroll.take();
+            let segments = active.detector.accept(&preroll);
+            active.segments = segments;
+            active.wake_at = Some(preroll.len());
+        }
+        self.advance();
+    }
+
+    fn load_conversation_models(&self) -> Result<Active, VoiceError> {
+        let speech = catalog::speech();
+        let detector =
+            SpeechDetector::load(&self.files.speech_detection, &speech.speech_detection)?;
+        let mut transcriber = Transcriber::load(&self.files.transcription, &speech.transcription)?;
+        transcriber.expect_words(&self.host.vocabulary())?;
+        let sender = self.sender.clone();
+        let speaker = Speaker::new(
+            &self.settings.helper,
+            &self.files.speech_output_dir,
+            &speech.speech_output,
+            &self.voice,
+            move || {
+                let _ = sender.try_send(Input::SpeechFinished);
+            },
+        )?;
+        Ok(Active {
             detector,
             transcriber,
-            segments,
-            wake_at: Some(preroll.len()),
-        });
-        self.advance();
+            speaker,
+            segments: Vec::new(),
+            wake_at: None,
+        })
     }
 
     /// Moves the conversation forward based on what the speech detector has found.
@@ -292,13 +330,19 @@ impl Listener {
                 ends: relevance == Relevance::Thanks,
             },
         };
-        match address::extract(text, &self.wake_word) {
-            Addressed::Request(candidates) => {
-                let likely = candidates
+        match address::extract(text, &self.settings.wake_word) {
+            Addressed::Request {
+                candidates,
+                certain,
+            } => {
+                let relevant = candidates
                     .iter()
-                    .find(|candidate| self.host.relevance(candidate) != Relevance::Unrelated)
-                    .unwrap_or(&candidates[0]);
-                request(likely)
+                    .find(|candidate| self.host.relevance(candidate) != Relevance::Unrelated);
+                match (relevant, certain) {
+                    (Some(candidate), _) => request(candidate),
+                    (None, true) => request(&candidates[0]),
+                    (None, false) => Interpretation::Ignore,
+                }
             }
             Addressed::NameOnly => Interpretation::NameOnly,
             Addressed::NotForLuna if follow_up => match self.host.relevance(text) {
@@ -320,30 +364,40 @@ impl Listener {
             return;
         }
         self.report(VoiceState::Responding);
-        if self.speaker.speak(text).is_ok() {
-            let deadline = Instant::now() + MAX_REPLY;
-            loop {
-                let wait = deadline.saturating_duration_since(Instant::now());
-                match self.input.recv_timeout(wait) {
-                    Ok(Input::SpeechFinished) => break,
-                    Ok(Input::Audio(_)) => {}
-                    Ok(Input::MicrophoneLost(error)) => {
-                        self.speaker.stop();
-                        self.host.stopped(error.into());
-                        self.stopping = true;
-                        break;
-                    }
-                    Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => {
-                        self.speaker.stop();
-                        self.stopping = true;
-                        break;
-                    }
-                    Err(RecvTimeoutError::Timeout) => {
-                        log::warn!("spoken reply did not finish");
-                        self.speaker.stop();
-                        break;
-                    }
+        let Some(active) = self.active.as_mut() else {
+            self.conversation.finished_speaking(Instant::now());
+            return;
+        };
+        if let Err(error) = active.speaker.speak(text) {
+            self.host.stopped(error);
+            self.stopping = true;
+        }
+        let deadline = Instant::now() + MAX_REPLY;
+        let mut level_reported = Instant::now();
+        while !self.stopping {
+            // Reports the voice's loudness for the window's animation, whatever else arrives.
+            if level_reported.elapsed() >= LEVEL_INTERVAL {
+                level_reported = Instant::now();
+                self.host.audio_level(active.speaker.level());
+            }
+            match self.input.recv_timeout(LEVEL_INTERVAL) {
+                Ok(Input::SpeechFinished) => break,
+                Ok(Input::Audio(_)) => {}
+                Ok(Input::MicrophoneLost(error)) => {
+                    active.speaker.stop();
+                    self.host.stopped(error.into());
+                    self.stopping = true;
                 }
+                Ok(Input::Stop) | Err(RecvTimeoutError::Disconnected) => {
+                    active.speaker.stop();
+                    self.stopping = true;
+                }
+                Err(RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+                    log::warn!("spoken reply did not finish");
+                    active.speaker.stop();
+                    break;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
             }
         }
         self.conversation.finished_speaking(Instant::now());

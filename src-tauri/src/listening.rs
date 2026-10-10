@@ -9,7 +9,7 @@ use crate::assistant::{self, Relevance};
 use crate::commands::AppState;
 use crate::error::AppError;
 use crate::settings::{self, Settings};
-use crate::voice::{CaptureError, Host, Timing, VoiceError, VoiceState};
+use crate::voice::{self, CaptureError, Host, Timing, VoiceError, VoiceSettings, VoiceState};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -101,8 +101,19 @@ impl Host for VoiceHost {
         assistant::relevance(&state.home_assistant.cache().read(), text)
     }
 
+    fn vocabulary(&self) -> String {
+        let state = self.app.state::<AppState>();
+        assistant::vocabulary(&state.home_assistant.cache().read())
+    }
+
     fn cancel(&self) {
         self.app.state::<AppState>().cancel_request();
+    }
+
+    fn audio_level(&self, level: f32) {
+        if self.app.state::<AppState>().window_visible() {
+            crate::emit(&self.app, crate::LEVEL_EVENT, level);
+        }
     }
 
     fn state_changed(&self, state: VoiceState) {
@@ -137,8 +148,18 @@ pub fn models_changed(app: &AppHandle) {
     }
 }
 
-/// Turns listening on or off and remembers the choice.
+/// Turns listening on or off and remembers the choice. Any failure is reported through the voice
+/// status, which the window and tray show.
 fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
+    let result = switch(app, enabled);
+    if let Err(error) = &result {
+        let state = app.state::<AppState>().status().voice.state;
+        set_status(app, state, Some(error.user_message()));
+    }
+    result
+}
+
+fn switch(app: &AppHandle, enabled: bool) -> Result<(), AppError> {
     let state = app.state::<AppState>();
     let result = if enabled {
         start(app)
@@ -162,9 +183,22 @@ pub fn start(app: &AppHandle) -> Result<(), AppError> {
         set_status(app, VoiceState::Off, Some(error.user_message()));
         return Err(error);
     };
-    let wake_word = state.settings()?.wake_word;
-    let host = Arc::new(VoiceHost { app: app.clone() });
-    if let Err(error) = state.voice.start(files, wake_word, Timing::default(), host) {
+    let saved = state.settings()?;
+    let started = voice::bundled_helper()
+        .map_err(|error| {
+            log::error!("could not find the voice helper: {error}");
+            VoiceError::Speech
+        })
+        .and_then(|helper| {
+            let settings = VoiceSettings {
+                wake_word: saved.wake_word,
+                voice: saved.voice,
+                helper,
+            };
+            let host = Arc::new(VoiceHost { app: app.clone() });
+            state.voice.start(files, settings, Timing::default(), host)
+        });
+    if let Err(error) = started {
         set_status(app, VoiceState::Off, Some(problem(&error)));
         return Err(AppError::Voice(error));
     }
@@ -200,7 +234,9 @@ pub fn problem(error: &VoiceError) -> String {
         VoiceError::ModelLoad(_) | VoiceError::Transcription => {
             "Voice couldn't start. Download the voice models again in Settings."
         }
-        VoiceError::Speech => "Spoken replies aren't available on this computer.",
+        VoiceError::Speech => {
+            "Luna's voice couldn't start. Download the voice models again in Settings."
+        }
         VoiceError::WakeWord => "Luna can't listen for that wake word. Try another in Settings.",
     }
     .to_owned()

@@ -70,6 +70,7 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: cargo fmt --manifest-path src-tauri/Cargo.toml --check
+      - run: cargo fmt --manifest-path voice-helper/Cargo.toml --check
 
   build:
     name: Build ${{ matrix.name }}
@@ -140,6 +141,13 @@ jobs:
 
       - name: Fetch sherpa-onnx libraries
         run: node scripts/fetch-sherpa-onnx.mjs "${{ matrix.target }}"
+
+      - name: Build voice helper
+        run: node scripts/ensure-voice-helper.mjs "${{ matrix.target }}"
+
+      - name: Lint voice helper
+        working-directory: voice-helper
+        run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Lint Rust
         working-directory: src-tauri

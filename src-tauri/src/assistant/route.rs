@@ -538,6 +538,23 @@ pub fn domains(intent: &Intent) -> Vec<&'static str> {
     }
 }
 
+/// Rooms, then devices Luna can control, as "Front Porch, Kitchen, Bedroom AC", for priming
+/// speech recognition. Earlier names matter most, since the list may be cut short.
+pub fn vocabulary(home: &Home) -> String {
+    let areas = home.areas.iter().map(|area| area.name.as_str());
+    let devices = home
+        .entities
+        .values()
+        .filter(|entity| !entity.internal && CONTROL_DOMAINS.contains(&entity.domain()))
+        .map(|entity| entity.name.as_str());
+    let mut seen = HashSet::new();
+    areas
+        .chain(devices)
+        .filter(|name| seen.insert(name.to_lowercase()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Most devices Luna offers as choices before leaving an unclear request to the model.
 const MAX_CHOICES: usize = 4;
 
@@ -1151,5 +1168,17 @@ mod tests {
             resolve(&home, &Memory::default(), &Subject::Pronoun, &off),
             Resolution::Unknown
         );
+    }
+
+    #[test]
+    fn vocabulary_lists_rooms_then_controllable_devices_once() {
+        let home = porch_home();
+        let vocabulary = vocabulary(&home);
+        assert!(vocabulary.contains("Front Porch"));
+        let first_area = &home.areas[0].name;
+        assert!(vocabulary.starts_with(first_area.as_str()));
+        let names: Vec<&str> = vocabulary.split(", ").collect();
+        let unique: HashSet<String> = names.iter().map(|name| name.to_lowercase()).collect();
+        assert_eq!(names.len(), unique.len());
     }
 }

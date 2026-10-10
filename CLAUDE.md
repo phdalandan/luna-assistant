@@ -67,7 +67,7 @@ Luna is a privacy-first, local voice assistant for Home Assistant. It is a backg
 - React is for presentation and interaction only. Do not move logic into React because it is easier.
 - Types shared with the frontend are defined in Rust and exported with `ts-rs` to `src/bindings`. Never hand-edit them.
 - Commands return `CommandError { message }` with a user-facing message. Log the technical error in Rust.
-- Inference runs only through the bundled llama.cpp server in `src-tauri/src/inference/`. Never add another inference backend without approval.
+- Local inference runs only through the bundled llama.cpp server in `src-tauri/src/inference/`; cloud inference only through the OpenAI and Anthropic providers in `src-tauri/src/inference/cloud/`. Never add another inference backend without approval.
 - Model-specific behaviour lives only in the catalogue (`src-tauri/models.json`). Never hardcode it elsewhere.
 - Never bundle model weights. Never download a model without an explicit user action. Never switch models automatically.
 - Downloaded models must be verified against the catalogue SHA-256 before they count as installed.

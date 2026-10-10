@@ -1,16 +1,16 @@
-//! Decides from a transcript whether Luna was spoken to by her wake word, and extracts the
-//! request. The name must be used to address her: at the start ("Luna, …", "Hey Luna …"), at the
-//! end ("…, Luna?"), or set off by commas in the middle ("Could you, Luna, …"). A mention such
-//! as "I told Luna about it" does not count.
+//! Whether a transcript addresses Luna by her wake word: at the start, at the end, or followed
+//! by a pause mid-sentence ("Could you, Luna, …"). "I told Luna about it" does not count.
 
 const GREETINGS: &[&str] = &["hey", "hi", "hello", "ok", "okay", "oh", "yo"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addressed {
-    /// Luna was addressed with a request, which no longer contains the name. When the name
-    /// sits between two sentences, as in "Dinner was great, Luna. Turn off the lights.", either
-    /// could be the request, so both are given, the likelier first.
-    Request(Vec<String>),
+    /// Possible requests without the name, likelier first. Not `certain` when the name was
+    /// mid-sentence, so only a request clearly about the home counts.
+    Request {
+        candidates: Vec<String>,
+        certain: bool,
+    },
     /// Only the name was said, so Luna should listen for the request.
     NameOnly,
     NotForLuna,
@@ -23,18 +23,37 @@ pub fn extract(transcript: &str, wake_word: &str) -> Addressed {
         .collect();
     let sentences = sentences(&clean(transcript));
     for (index, sentence) in sentences.iter().enumerate() {
-        let Some((rest, at_end)) = without_name(sentence, &name) else {
+        let Some(placement) = place_name(sentence, &name) else {
             continue;
         };
-        if has_words(&rest) {
-            let mut candidates = vec![finish(&rest)];
-            if let Some(next) = sentences
-                .get(index + 1)
-                .filter(|next| at_end && has_words(next))
-            {
-                candidates.push(finish(next));
+        let (mut candidates, certain) = match placement {
+            Placement::Start { after } => (vec![after], true),
+            // "Dinner was great, Luna. Turn off the lights." could mean either sentence.
+            Placement::End { before } => {
+                let next = sentences.get(index + 1).filter(|next| has_words(next));
+                (
+                    vec![Some(before), next.cloned()]
+                        .into_iter()
+                        .flatten()
+                        .collect(),
+                    true,
+                )
             }
-            return Addressed::Request(candidates);
+            Placement::Middle { before, after } => {
+                let whole = format!("{before} {after}");
+                (vec![after, whole], false)
+            }
+        };
+        candidates.retain(|candidate| has_words(candidate));
+        if !candidates.is_empty() {
+            let candidates = candidates
+                .iter()
+                .map(|candidate| finish(candidate))
+                .collect();
+            return Addressed::Request {
+                candidates,
+                certain,
+            };
         }
         // "Luna. Turn off the lights." or "Turn off the lights. Luna?"
         let neighbour = sentences.get(index + 1).or_else(|| {
@@ -43,7 +62,10 @@ pub fn extract(transcript: &str, wake_word: &str) -> Addressed {
                 .and_then(|before| sentences.get(before))
         });
         return match neighbour {
-            Some(neighbour) if has_words(neighbour) => Addressed::Request(vec![finish(neighbour)]),
+            Some(neighbour) if has_words(neighbour) => Addressed::Request {
+                candidates: vec![finish(neighbour)],
+                certain: true,
+            },
             _ => Addressed::NameOnly,
         };
     }
@@ -121,9 +143,14 @@ fn edit_distance(a: &str, b: &str) -> usize {
     previous[b.len()]
 }
 
-/// The sentence without the name, if the name is used to address Luna, and whether the name
-/// ended the sentence.
-fn without_name(sentence: &str, name: &[String]) -> Option<(String, bool)> {
+/// Where the name addresses Luna in a sentence, with the words around it.
+enum Placement {
+    Start { after: String },
+    End { before: String },
+    Middle { before: String, after: String },
+}
+
+fn place_name(sentence: &str, name: &[String]) -> Option<Placement> {
     let words = words(sentence);
     if name.is_empty() || words.len() < name.len() {
         return None;
@@ -134,23 +161,26 @@ fn without_name(sentence: &str, name: &[String]) -> Option<(String, bool)> {
             .all(|(offset, part)| sounds_like(words[start + offset].text, part))
     })?;
     let end = position + name.len();
+    let join = |words: &[Word<'_>]| {
+        words
+            .iter()
+            .map(|word| word.text)
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let (before, after) = (join(&words[..position]), join(&words[end..]));
     let leading_greetings = words[..position]
         .iter()
         .all(|word| GREETINGS.contains(&word.text.to_lowercase().as_str()));
-    let at_end = end == words.len();
-    let set_off = position > 0 && words[position - 1].pause_after && words[end - 1].pause_after;
-    let kept: Vec<&str> = if leading_greetings {
-        words[end..].iter().map(|word| word.text).collect()
-    } else if at_end || set_off {
-        words[..position]
-            .iter()
-            .chain(&words[end..])
-            .map(|word| word.text)
-            .collect()
+    if leading_greetings {
+        Some(Placement::Start { after })
+    } else if end == words.len() {
+        Some(Placement::End { before })
+    } else if words[end - 1].pause_after {
+        Some(Placement::Middle { before, after })
     } else {
-        return None;
-    };
-    Some((kept.join(" "), at_end))
+        None
+    }
 }
 
 fn has_words(text: &str) -> bool {
@@ -167,7 +197,17 @@ mod tests {
     use super::*;
 
     fn request(text: &str) -> Addressed {
-        Addressed::Request(vec![text.into()])
+        Addressed::Request {
+            candidates: vec![text.into()],
+            certain: true,
+        }
+    }
+
+    fn unsure(candidates: &[&str]) -> Addressed {
+        Addressed::Request {
+            candidates: candidates.iter().map(|text| (*text).to_owned()).collect(),
+            certain: false,
+        }
     }
 
     #[test]
@@ -206,13 +246,23 @@ mod tests {
     }
 
     #[test]
-    fn the_name_in_the_middle_counts_when_set_off_by_commas() {
+    fn the_name_in_the_middle_counts_when_a_pause_follows() {
         assert_eq!(
             extract(
                 "Could you, Luna, check the temperature in the kitchen?",
                 "Luna"
             ),
-            request("Could you check the temperature in the kitchen")
+            unsure(&[
+                "Check the temperature in the kitchen",
+                "Could you check the temperature in the kitchen"
+            ])
+        );
+        assert_eq!(
+            extract("Dinner was great Luna, turn off the kitchen lights", "Luna"),
+            unsure(&[
+                "Turn off the kitchen lights",
+                "Dinner was great turn off the kitchen lights"
+            ])
         );
     }
 
@@ -252,10 +302,13 @@ mod tests {
                 "Dinner was great, Luna. Turn off the kitchen lights.",
                 "Luna"
             ),
-            Addressed::Request(vec![
-                "Dinner was great".into(),
-                "Turn off the kitchen lights".into()
-            ])
+            Addressed::Request {
+                candidates: vec![
+                    "Dinner was great".into(),
+                    "Turn off the kitchen lights".into()
+                ],
+                certain: true,
+            }
         );
     }
 

@@ -20,7 +20,7 @@ use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_autostart::MacosLauncher;
 
 use commands::AppState;
-use inference::Engine;
+use inference::{CloudClient, DEFAULT_TIMEOUT, Endpoints, Engine};
 use models::{DownloadProgress, ModelEvents, ModelManager, ModelStore};
 
 const STATUS_EVENT: &str = "status-changed";
@@ -28,6 +28,8 @@ const MODELS_EVENT: &str = "models-changed";
 const PROGRESS_EVENT: &str = "download-progress";
 const CONVERSATION_EVENT: &str = "conversation-cleared";
 const INTERACTIONS_EVENT: &str = "interactions-changed";
+/// Microphone loudness from 0 to 1 while listening, for the window's animation. Never audio.
+const LEVEL_EVENT: &str = "voice-level";
 
 struct FrontendEvents(AppHandle);
 
@@ -83,7 +85,8 @@ pub fn run() {
                 data_dir.join("llama-server.pid"),
                 data_dir.join("prompt-cache"),
             );
-            let state = AppState::new(db, engine, models);
+            let cloud = CloudClient::new(Endpoints::default(), DEFAULT_TIMEOUT)?;
+            let state = AppState::new(db, engine, models, cloud);
             state.connect_home_assistant(&state.settings()?.home_assistant_url);
             app.manage(state);
             forward_status(app.handle());
@@ -101,6 +104,10 @@ pub fn run() {
             commands::get_settings,
             commands::save_settings,
             commands::has_home_assistant_token,
+            commands::saved_api_keys,
+            commands::remove_api_key,
+            commands::list_cloud_models,
+            commands::set_inference_mode,
             commands::discover_home_assistant,
             commands::get_status,
             commands::list_models,
@@ -118,6 +125,7 @@ pub fn run() {
             commands::get_launch_at_login,
             commands::set_launch_at_login,
             commands::set_listening,
+            commands::list_voices,
             commands::get_voice_models,
             commands::download_voice_models,
             commands::cancel_voice_download,

@@ -8,11 +8,17 @@ export const settings: Settings = {
   contextLength: 4096,
   listening: false,
   wakeWord: "Luna",
+  voice: "af_heart",
+  inference: "local",
+  cloudProvider: "openai",
+  openaiModel: "gpt-6-luna",
+  anthropicModel: "claude-haiku-5-5",
 };
 
 export const status: Status = {
   homeAssistant: "connected",
   engine: { state: "idle" },
+  inference: "local",
   voice: { state: "off", problem: null },
   conversationEndsAt: null,
 };
@@ -42,6 +48,19 @@ export function mockBackend(overrides: Record<string, Handler> = {}) {
     get_settings: () => settings,
     get_launch_at_login: () => false,
     has_home_assistant_token: () => true,
+    saved_api_keys: () => [],
+    list_cloud_models: () => [
+      { provider: "openai", id: "gpt-6-luna", name: "GPT-6 Luna" },
+      { provider: "openai", id: "gpt-6-sol", name: "GPT-6 Sol" },
+      {
+        provider: "anthropic",
+        id: "claude-haiku-5-5",
+        name: "Claude Haiku 5.5",
+      },
+      { provider: "anthropic", id: "claude-sonnet-5", name: "Claude Sonnet 5" },
+    ],
+    set_inference_mode: () => null,
+    remove_api_key: () => null,
     discover_home_assistant: () => [],
     get_status: () => status,
     list_models: () => [model()],
@@ -52,6 +71,10 @@ export function mockBackend(overrides: Record<string, Handler> = {}) {
       download: null,
     }),
     prepare_assistant: () => null,
+    list_voices: () => [
+      { id: "af_heart", name: "Heart", accent: "US" },
+      { id: "bm_george", name: "George", accent: "UK" },
+    ],
     "plugin:event|listen": () => 1,
     "plugin:event|unlisten": () => undefined,
   };

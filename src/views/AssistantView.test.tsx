@@ -44,6 +44,23 @@ describe("AssistantView", () => {
     expect(screen.getByRole("button", { name: "Use" })).toBeTruthy();
   });
 
+  it("uses the cloud provider without a local model", async () => {
+    const calls = mockBackend({
+      get_status: () => ({ ...status, inference: "cloud" }),
+      ask: () => interaction(),
+    });
+    render(<AssistantView />);
+    fireEvent.change(await screen.findByLabelText("Message"), {
+      target: { value: "Turn off the kitchen light" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    expect(await screen.findByText("The kitchen light is off.")).toBeTruthy();
+    expect(
+      screen.queryByText("Download an AI model to get started."),
+    ).toBeNull();
+    expect(calls.some((call) => call.cmd === "prepare_assistant")).toBe(false);
+  });
+
   it("sends requests and shows responses with verified results", async () => {
     mockBackend({ list_models: active, ask: () => interaction() });
     render(<AssistantView />);
@@ -155,5 +172,20 @@ describe("AssistantView", () => {
     render(<AssistantView />);
     expect(await screen.findByText("Conversation resets in 1:31")).toBeTruthy();
     expect(screen.queryByRole("heading", { name: "Luna" })).toBeNull();
+  });
+
+  it("leaves listening failures to the voice status instead of repeating them", async () => {
+    mockBackend({
+      list_models: active,
+      set_listening: () => {
+        throw { message: "Download the voice models in Settings first." };
+      },
+    });
+    render(<AssistantView />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Microphone off" }),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByRole("alert")).toBeNull();
   });
 });

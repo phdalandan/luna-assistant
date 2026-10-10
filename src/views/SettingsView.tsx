@@ -1,20 +1,36 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectionStatus } from "../bindings/ConnectionStatus";
+import { CloudSettings } from "../components/CloudSettings";
 import { ModelList } from "../components/ModelList";
 import { VoiceModels } from "../components/VoiceModels";
 import {
   api,
   errorMessage,
+  type CloudModelOption,
+  type CloudProvider,
   type DiscoveredInstance,
+  type InferenceMode,
   type Settings,
+  type VoiceOption,
 } from "../lib/api";
 import { useModels, useStatus } from "../lib/hooks";
 
 const CONTEXT_LENGTHS = [4096, 8192, 16384, 32768];
 
+const INFERENCE_MODES: { mode: InferenceMode; label: string }[] = [
+  { mode: "local", label: "Local" },
+  { mode: "cloud", label: "Cloud" },
+];
+
+const CONNECTION_BADGES: Partial<
+  Record<ConnectionStatus, { label: string; tone: string }>
+> = {
+  connecting: { label: "Connecting", tone: "neutral" },
+  connected: { label: "Connected", tone: "success" },
+  reconnecting: { label: "Reconnecting", tone: "warning" },
+};
+
 const CONNECTION_MESSAGES: Partial<Record<ConnectionStatus, string>> = {
-  connecting: "Connecting",
-  connected: "Connected",
   reconnecting: "Can't reach Home Assistant. Retrying.",
   authFailed:
     "The access token was rejected. Create a new one in your Home Assistant profile.",
@@ -28,8 +44,12 @@ export function SettingsView() {
   const [draft, setDraft] = useState<Settings | null>(null);
   const [token, setToken] = useState("");
   const [hasToken, setHasToken] = useState(false);
+  const [apiKey, setApiKey] = useState("");
+  const [savedKeys, setSavedKeys] = useState<CloudProvider[]>([]);
+  const [cloudModels, setCloudModels] = useState<CloudModelOption[]>([]);
   const [discovered, setDiscovered] = useState<DiscoveredInstance[]>([]);
   const [launchAtLogin, setLaunchAtLogin] = useState(false);
+  const [voices, setVoices] = useState<VoiceOption[]>([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const status = useStatus();
@@ -53,6 +73,18 @@ export function SettingsView() {
       .hasHomeAssistantToken()
       .then(setHasToken)
       .catch((err: unknown) => setError(errorMessage(err)));
+    api
+      .listVoices()
+      .then(setVoices)
+      .catch((err: unknown) => setError(errorMessage(err)));
+    api
+      .savedApiKeys()
+      .then(setSavedKeys)
+      .catch((err: unknown) => setError(errorMessage(err)));
+    api
+      .listCloudModels()
+      .then(setCloudModels)
+      .catch((err: unknown) => setError(errorMessage(err)));
   }, []);
 
   if (!draft) {
@@ -62,7 +94,10 @@ export function SettingsView() {
   const update = (changes: Partial<Settings>) =>
     setDraft({ ...draft, ...changes });
   const changed =
-    token.trim() !== "" || JSON.stringify(draft) !== JSON.stringify(saved);
+    token.trim() !== "" ||
+    apiKey.trim() !== "" ||
+    JSON.stringify(draft) !== JSON.stringify(saved);
+  const badge = status && CONNECTION_BADGES[status.homeAssistant];
   const connection = status && CONNECTION_MESSAGES[status.homeAssistant];
   const suggestions = discovered.filter(
     (instance) => instance.url !== draft.homeAssistantUrl,
@@ -74,13 +109,21 @@ export function SettingsView() {
     setSaving(true);
     setError(null);
     try {
-      const settings = await api.saveSettings(draft, token.trim() || null);
+      const settings = await api.saveSettings(
+        draft,
+        token.trim() || null,
+        apiKey.trim() || null,
+      );
       setSaved(settings);
       setDraft(settings);
       setHasToken(
         settings.homeAssistantUrl !== "" && (hasToken || token.trim() !== ""),
       );
       setToken("");
+      if (apiKey.trim() !== "") {
+        setSavedKeys((keys) => [...keys, settings.cloudProvider]);
+        setApiKey("");
+      }
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -93,12 +136,37 @@ export function SettingsView() {
     action().catch((err: unknown) => setError(errorMessage(err)));
   }
 
+  /** Switches immediately, like choosing a model, rather than waiting for Save. */
+  function switchMode(inference: InferenceMode) {
+    if (!draft || inference === draft.inference) return;
+    setSaved((current) => current && { ...current, inference });
+    setDraft({ ...draft, inference });
+    run(() => api.setInferenceMode(inference));
+  }
+
+  function removeKey(provider: CloudProvider) {
+    run(() =>
+      api
+        .removeApiKey(provider)
+        .then(() =>
+          setSavedKeys((keys) => keys.filter((key) => key !== provider)),
+        ),
+    );
+  }
+
   return (
     <form className="settings" onSubmit={save} noValidate>
       <h1>Settings</h1>
 
       <fieldset>
-        <legend>Home Assistant</legend>
+        <legend className="legend-row">
+          <span>Home Assistant</span>
+          {badge && (
+            <span className="badge" data-tone={badge.tone}>
+              {badge.label}
+            </span>
+          )}
+        </legend>
         {connection && <p className="status-line">{connection}</p>}
         {suggestions.map((instance) => (
           <button
@@ -111,16 +179,14 @@ export function SettingsView() {
             <span className="model-details">{instance.url}</span>
           </button>
         ))}
-        <label className="field">
-          <span>Address</span>
-          <input
-            className="input"
-            type="url"
-            placeholder="http://homeassistant.local:8123"
-            value={draft.homeAssistantUrl}
-            onChange={(e) => update({ homeAssistantUrl: e.target.value })}
-          />
-        </label>
+        <input
+          className="input"
+          type="url"
+          aria-label="Address"
+          placeholder="http://homeassistant.local:8123"
+          value={draft.homeAssistantUrl}
+          onChange={(e) => update({ homeAssistantUrl: e.target.value })}
+        />
         <label className="field">
           <span>Access token</span>
           <input
@@ -136,22 +202,52 @@ export function SettingsView() {
 
       <fieldset>
         <legend>AI Models</legend>
-        {models && <ModelList models={models} engine={status?.engine} />}
-        {modelsError && <p className="error">{modelsError}</p>}
-        <label className="field">
-          <span>Context length</span>
-          <select
-            className="input"
-            value={draft.contextLength}
-            onChange={(e) => update({ contextLength: Number(e.target.value) })}
-          >
-            {CONTEXT_LENGTHS.map((length) => (
-              <option key={length} value={length}>
-                {length.toLocaleString()} tokens
-              </option>
-            ))}
-          </select>
-        </label>
+        <div className="segmented" role="radiogroup" aria-label="AI location">
+          {INFERENCE_MODES.map(({ mode, label }) => (
+            <button
+              key={mode}
+              className="segment"
+              type="button"
+              role="radio"
+              aria-checked={draft.inference === mode}
+              onClick={() => switchMode(mode)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+        {draft.inference === "local" ? (
+          <>
+            {models && <ModelList models={models} engine={status?.engine} />}
+            {modelsError && <p className="error">{modelsError}</p>}
+            <label className="field">
+              <span>Context length</span>
+              <select
+                className="input"
+                value={draft.contextLength}
+                onChange={(e) =>
+                  update({ contextLength: Number(e.target.value) })
+                }
+              >
+                {CONTEXT_LENGTHS.map((length) => (
+                  <option key={length} value={length}>
+                    {length.toLocaleString()} tokens
+                  </option>
+                ))}
+              </select>
+            </label>
+          </>
+        ) : (
+          <CloudSettings
+            settings={draft}
+            update={update}
+            models={cloudModels}
+            apiKey={apiKey}
+            setApiKey={setApiKey}
+            savedKeys={savedKeys}
+            removeKey={removeKey}
+          />
+        )}
       </fieldset>
 
       <fieldset>
@@ -166,6 +262,20 @@ export function SettingsView() {
             value={draft.wakeWord}
             onChange={(e) => update({ wakeWord: e.target.value })}
           />
+        </label>
+        <label className="field">
+          <span>Voice</span>
+          <select
+            className="input"
+            value={draft.voice}
+            onChange={(e) => update({ voice: e.target.value })}
+          >
+            {voices.map((voice) => (
+              <option key={voice.id} value={voice.id}>
+                {voice.name} ({voice.accent})
+              </option>
+            ))}
+          </select>
         </label>
       </fieldset>
 

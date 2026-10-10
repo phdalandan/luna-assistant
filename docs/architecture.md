@@ -1,31 +1,33 @@
 # Architecture
 
-Luna is a single Tauri 2 process plus a bundled llama.cpp server that runs only while a model is loaded. Rust owns all logic; React renders state and forwards user input through typed commands.
+Luna is a single Tauri 2 process plus a bundled llama.cpp server that runs only while a model is loaded. Users can choose a cloud model (OpenAI or Anthropic) instead of a local one. Rust owns all logic; React renders state and forwards user input through typed commands.
 
 ## Modules
 
-| Module                             | Location                                           |
-| ---------------------------------- | -------------------------------------------------- |
-| Desktop UI                         | `src/` (React, TypeScript, Vite)                   |
-| Lifecycle and tray                 | `src-tauri/src/lifecycle.rs`                       |
-| Commands (frontend boundary)       | `src-tauri/src/commands.rs`                        |
-| Settings and persistence           | `src-tauri/src/settings.rs`, `src-tauri/src/db.rs` |
-| Conversation history               | `src-tauri/src/history.rs`                         |
-| Credentials                        | `src-tauri/src/credentials.rs`                     |
-| Home Assistant integration         | `src-tauri/src/home_assistant/`                    |
-| Model catalogue and downloads      | `src-tauri/src/models/`, `src-tauri/models.json`   |
-| Local inference (llama.cpp)        | `src-tauri/src/inference/`                         |
-| Prompting and tool calling         | `src-tauri/src/assistant/`                         |
-| Command validation and execution   | `src-tauri/src/actions/`                           |
-| Voice (capture, wake word, speech) | `src-tauri/src/voice/`                             |
-| Voice and app integration          | `src-tauri/src/listening.rs`                       |
+| Module                              | Location                                           |
+| ----------------------------------- | -------------------------------------------------- |
+| Desktop UI                          | `src/` (React, TypeScript, Vite)                   |
+| Lifecycle and tray                  | `src-tauri/src/lifecycle.rs`                       |
+| Commands (frontend boundary)        | `src-tauri/src/commands.rs`                        |
+| Settings and persistence            | `src-tauri/src/settings.rs`, `src-tauri/src/db.rs` |
+| Conversation history                | `src-tauri/src/history.rs`                         |
+| Credentials                         | `src-tauri/src/credentials.rs`                     |
+| Home Assistant integration          | `src-tauri/src/home_assistant/`                    |
+| Model catalogue and downloads       | `src-tauri/src/models/`, `src-tauri/models.json`   |
+| Local inference (llama.cpp)         | `src-tauri/src/inference/`                         |
+| Cloud inference (OpenAI, Anthropic) | `src-tauri/src/inference/cloud/`                   |
+| Prompting and tool calling          | `src-tauri/src/assistant/`                         |
+| Command validation and execution    | `src-tauri/src/actions/`                           |
+| Voice (capture, wake word, speech)  | `src-tauri/src/voice/`                             |
+| Voice and app integration           | `src-tauri/src/listening.rs`                       |
 
 ## Request flow
 
 ```
 text input ─▶ router (Rust) ─┬─▶ recognised and unambiguous: time, undo, "are you sure", on/off/open/close/lock,
                              │   state questions ─▶ validator ─▶ executor ─▶ verified reply (no model)
-                             └─▶ otherwise ─▶ llama.cpp (cached instructions, layout, tools + request context)
+                             └─▶ otherwise ─▶ selected provider: llama.cpp, OpenAI, or Anthropic
+                                 (cached instructions, layout, tools + request context)
                                  ─▶ tool calls ─▶ resolver ─▶ validator ─▶ executor ─▶ verified reply
 ```
 
@@ -40,13 +42,25 @@ text input ─▶ router (Rust) ─┬─▶ recognised and unambiguous: time, u
 - **Reply wording** (`assistant/phrasing.rs`) is built in Rust from verified results, never by another model pass. Acknowledgements rotate in a fixed order kept in conversation memory ("Done.", "You got it.", "Turned off.", "All set."), so wording varies without randomness. A single device the user named, or called "it", is not named again. More than three devices get a count ("Done. All 6 devices are off."). Partial failures always name what did not work. Yes-or-no questions answer from the live state ("Nope, it's closed."). Security-sensitive results after confirmation always name the device.
 - **Honest replies.** If the model's action is rejected because the device cannot do it, the reply says so even when another action succeeded. The out-of-scope reply is never used after a tool call. The window warm-up runs only when the model is not already loaded, so it never evicts a conversation in progress.
 
+## Cloud inference
+
+Settings → AI Models has a Local / Cloud control, Local by default. It switches immediately: the mode is saved, any request in progress stops before its next model pass (execution is never interrupted), and the local model is released in Cloud mode or the selected one loaded in Local mode. Luna does not restart, and the conversation memory and history are kept because they live in Rust, not in a provider. Each request uses the provider saved when it started, and only one request runs at a time, so two providers never answer at once. A failure is reported; Luna never switches provider or model on its own.
+
+- **One contract.** `assistant::Provider` is the only thing that varies. Routing, prompts, the two tools, validation, execution, verification, and reply wording are shared. OpenAI uses the same Chat Completions format as llama.cpp; `inference/cloud/anthropic.rs` turns messages into content blocks and `tool_use` blocks back into Luna's tool calls.
+- **Models.** Listed in the `cloud` section of `models.json` with verified API IDs and their request settings: `gpt-6-luna` and `gpt-6-sol` with `reasoning_effort: none` (Chat Completions only allows function calling at `none`), `claude-haiku-5-5` and `claude-sonnet-5` with thinking disabled and `effort: low`. Entries cannot override the fields Luna sets (model, messages, tools, token limit). Checked against the providers' documentation in October 2026: GPT-6.1 Sol (`gpt-6.1-sol`) is newer but cannot call functions through Chat Completions, and Claude Sonnet 5 is a legacy model; Sonnet 5.5 rejects disabled thinking.
+- **Data sent.** The same prompt as local inference: instructions, floor and area names, the request with up to 15 relevant entities and their states, and up to three turns from the last 2 minutes. `get_states` reads return at most 25 entities. Never audio, tokens, keys, or logs. OpenAI requests set `store: false`.
+- **Credentials.** One API key per provider in the OS credential store. The frontend only learns which providers have one.
+- **Latency.** Requests are not streamed: tool calls are only usable once complete, and replies are built in Rust. Anthropic requests mark the tools and system prompt for prompt caching; OpenAI caches long prefixes itself. Timeout 30 s, no retries.
+- **Errors.** HTTP status and the provider's error type map to a short message ("Check your OpenAI API key.", "This model is unavailable."). Provider error messages are never logged, since they can quote part of the key. If a provider fails after an action ran, the verified result is still reported so the user does not repeat it.
+- **Metrics.** Each cloud request logs provider, model, input, cached, and output tokens, and latency; the request log adds total model wait time.
+
 ## Voice
 
 Voice is off until the user turns on listening, which needs the speech models (downloaded in Settings) and an AI model. The state is a Rust state machine (`voice/conversation.rs`), independent of the UI: `Passive`, `WakeDetected`, `CapturingCommand`, `Processing`, `Responding`, `AwaitingFollowUp`.
 
 ```
 microphone (CPAL, mono) ─▶ resample to 16 kHz ─▶ 5 s rolling buffer ─▶ wake word (sherpa-onnx KWS, "Luna")
-  on wake: load VAD + whisper ─▶ replay the buffer into the VAD ─▶ capture until 0.7 s of silence
+  on wake: load VAD + whisper ─▶ replay the buffer into the VAD ─▶ capture until 0.6 s of silence
   ─▶ whisper.cpp transcript ─▶ addressing check ─▶ same request path as typed text ─▶ spoken reply (OS voice)
   ─▶ follow-ups without the name for 20 s (8 s of silence ends it) ─▶ passive: VAD, whisper, and audio released
 ```
@@ -60,40 +74,59 @@ microphone (CPAL, mono) ─▶ resample to 16 kHz ─▶ 5 s rolling buffer ─�
 - **Timing.** Buffer 5 s, conversation window 20 s, silence timeout 8 s, false-wake check 1.5 s, longest request 15 s. Defaults are in `voice::Timing` and should be tuned with real use.
 - **Half duplex.** While Luna transcribes, thinks, or speaks, microphone audio is dropped at the source, so she never hears herself and audio never queues up.
 - **Stopping.** Turning listening off (window or tray) closes the microphone immediately, cancels any request so its reply is never spoken, and waits for the voice thread. A disconnected or denied microphone stops listening and explains why. Quitting stops voice first.
-- **Speech output** uses the operating system's voice through the `tts` crate (WinRT on Windows, AVFoundation on macOS). It must report when it finishes speaking; otherwise listening does not start.
+- **Speech output** is Kokoro v1.0, synthesised by the separate voice helper and played by Luna through CPAL, so the window's animation follows the real voice. The user picks one of eight English voices in Settings (Heart is the default). The helper starts when the wake word is heard, so its model loads while the user is still speaking, and exits when the conversation ends. If it cannot start or exits, listening stops and says so.
 
 ### Speech models
 
-All three are downloaded together in Settings, verified against the catalogue SHA-256, and never bundled. The wake word archive is checksummed, then only the five files the catalogue names (model, tokens, and vocabulary) are extracted.
+All four are downloaded together in Settings (558 MB), verified against the catalogue SHA-256, and never bundled. Archives are checksummed, then only the files and folders the catalogue names are extracted (paths that would leave the folder are skipped); the archive is then deleted and a marker records which verified archive the folder came from.
 
-| Model                  | Source                                                     | Size    | Licence    |
-| ---------------------- | ---------------------------------------------------------- | ------- | ---------- |
-| KWS zipformer 3.3M     | k2-fsa sherpa-onnx `kws-models` release (gigaspeech, int8) | 17.6 MB | Apache-2.0 |
-| Silero VAD             | k2-fsa sherpa-onnx `asr-models` release                    | 0.6 MB  | MIT        |
-| Whisper base.en (q5_1) | `ggerganov/whisper.cpp@5359861`                            | 59.7 MB | MIT        |
+| Model                   | Source                                                     | Size    | Licence    |
+| ----------------------- | ---------------------------------------------------------- | ------- | ---------- |
+| KWS zipformer 3.3M      | k2-fsa sherpa-onnx `kws-models` release (gigaspeech, int8) | 17.6 MB | Apache-2.0 |
+| Silero VAD              | k2-fsa sherpa-onnx `asr-models` release                    | 0.6 MB  | MIT        |
+| Whisper small.en (q5_1) | `ggerganov/whisper.cpp@5359861`                            | 190 MB  | MIT        |
+| Kokoro v1.0 (fp32)      | k2-fsa sherpa-onnx `tts-models` release (multi-lang v1.0)  | 350 MB  | Apache-2.0 |
 
 The k2-fsa models are published only as GitHub release assets, so the catalogue also trusts `github.com/k2-fsa/sherpa-onnx/releases/download/`. Checksums apply as for every model.
 
 ### Native libraries
 
 - **sherpa-onnx 1.13.8** (wake word, VAD, ONNX Runtime) is linked statically from the official `no-tts` release archives. The full archives include espeak-ng (GPL-3.0) for sherpa's own speech synthesis, which Luna does not use, and the `sherpa-onnx-sys` build script links them unconditionally and downloads them unverified. `.cargo/config.toml` replaces that build script's output (`links = "sherpa-onnx"`), and `scripts/fetch-sherpa-onnx.mjs` (part of `npm run runtime`) downloads and checks the pinned archive. Windows uses the `MD` (dynamic C runtime) build.
-- **whisper.cpp 1.8.3** is compiled in-process by `whisper-rs-sys` through CMake, with bindings generated by bindgen, which needs libclang (LLVM) on the build machine. Portable AVX2 code on x86, Metal on Apple Silicon. The `cmake` crate drops optimisation from release flags with the Visual Studio generator, so `.cargo/config.toml` sets them. Unoptimised, a transcription took 17 s instead of 1.3 s.
+- **whisper.cpp 1.8.3** is compiled in-process by `whisper-rs-sys` through CMake, with bindings generated by bindgen, which needs libclang (LLVM) on the build machine. Portable AVX2 code on x86, Metal on Apple Silicon. The `cmake` crate drops optimisation from release flags with the Visual Studio generator, so `.cargo/config.toml` sets them. Unoptimised, a transcription took 17 s instead of about 1.3 s.
+
+### Voice helper (GPL-3.0)
+
+Kokoro needs espeak-ng (GPL-3.0) to turn text into phonemes, so synthesis runs in `luna-voice`, a separate program in `voice-helper/` licensed GPL-3.0-or-later. Luna (Apache-2.0) never links it; the two talk over pipes. The helper links the full sherpa-onnx archive (pinned and checksummed by `scripts/fetch-sherpa-onnx.mjs`) through its own `.cargo/config.toml`, and `scripts/ensure-voice-helper.mjs` builds it into `src-tauri/binaries` as a Tauri sidecar. Installers therefore include a GPL program; its source is in this repository. Whether that separation satisfies the GPL for a given distribution is a legal judgement, not a technical one.
+
+Protocol, integers little-endian:
+
+- Arguments: model, voices, tokens, lexicon, espeak-ng data folder, language.
+- Once the model is loaded and warmed up with one silent synthesis, the helper writes the sample rate as a `u32`.
+- Each stdin line `id<TAB>speaker<TAB>speed<TAB>text` produces frames of `u32 id, u32 count, count × f32 samples`, one per sentence as it is ready, then a frame with count 0. A count of `u32::MAX` means synthesis failed.
+- It exits when stdin closes, so it never outlives Luna.
+
+int8 Kokoro was measured first and rejected: 3 to 4 s for "Done." against 0.5 s for fp32 on this CPU.
 
 ### Measurements
 
 Windows 11, AMD Ryzen 9 6900HS (8 cores, 16 threads), release build, synthetic voices (Windows David and Zira, 16 kHz). Not yet measured on macOS.
 
-| What                                   | Result                                                                                                   |
-| -------------------------------------- | -------------------------------------------------------------------------------------------------------- |
-| Passive listening, real microphone     | 4.5% of one core over 60 s; 97 MB resident for the voice thread, microphone, wake word, and voice output |
-| Wake word spotting alone               | 33 ms of one core per second of audio; model +24 MB                                                      |
-| Wake word, 17 recordings with "Luna"   | Detected in every one: name at the start, middle, end, or alone                                          |
-| Wake word, 9 recordings without it     | No detections ("lunar eclipse", "tuna", "lunch", a 10 s paragraph)                                       |
-| Mention ("I saw Luna at the park")     | Wake word fires; the addressing check ignores it                                                         |
-| Whisper base.en q5_1                   | Loaded in 150 ms, +66 MB, released when the conversation ends; 1.2 to 1.5 s per utterance (2 to 11 s)    |
-| Stop while processing, microphone loss | Voice thread finished 45 to 48 ms later; the cancelled reply was not spoken                              |
+| What                                   | Result                                                                                                                        |
+| -------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| Passive listening, real microphone     | About 4% of one core (3.9%, 4.1%, and 8.0% over three 60 s runs); 71 MB resident                                              |
+| Wake word spotting alone               | 33 ms of one core per second of audio; model +24 MB                                                                           |
+| Wake word, 17 recordings with "Luna"   | Detected in every one: name at the start, middle, end, or alone                                                               |
+| Wake word, 9 recordings without it     | No detections ("lunar eclipse", "tuna", "lunch", a 10 s paragraph)                                                            |
+| Mention ("I saw Luna at the park")     | Wake word fires; the addressing check ignores it                                                                              |
+| Whisper small.en q5_1                  | Loaded in 300 to 400 ms, +300 MB, released when the conversation ends; 0.7 s per request (2 to 5 s), 1.8 s for 11 s of speech |
+| Stop while processing, microphone loss | Voice thread finished 36 to 126 ms later; the cancelled reply was not spoken                                                  |
+| Kokoro fp32 in the voice helper        | Loads in 2.5 s plus a 1.5 s warm-up, 465 MB while a conversation lasts; 0.5 s to synthesise "Done."                           |
+| Reply ready to first sound             | About 0.55 s for follow-ups; 1 to 2.5 s for the first reply after the wake word, while the helper is still loading            |
 
-From the end of a request, Luna waits 0.7 s of silence, then transcribes (about 1.3 s) before handling it. End-to-end latency with the app and Home Assistant has not been measured.
+From the end of a request, Luna waits 0.6 s of silence, then transcribes (about 0.7 s with small.en) before handling it. Recognised requests then take milliseconds; a misheard device name falls through to the AI model, which takes 10 to 20 s on CPU, so transcription accuracy matters more than raw speed.
+
+- **Transcription accuracy.** Whisper is primed with the home's room and device names (`assistant::vocabulary`, cut at a name to 400 characters and 120 tokens) so they are spelled as in Home Assistant; real use had mistranscribed "porch light" as "Porsche Lite" with base.en. small.en replaced base.en for accuracy on real voices.
+- **Transcription window.** Whisper encodes a 30 s window by default. Luna sizes it to the request plus 1.3 s, but never under 256 frames (5 s): shorter windows made whisper repeat itself ("Jarvis turn off the lights Jarvis turn off the lights"). Measured on 35 clips: 30 s window 1.3 s (base.en); 256-frame minimum 0.7 s (small.en) with every transcript correct; 512 frames 1.3 s; 768 frames 2 s.
 
 ## Local inference
 
@@ -141,7 +174,7 @@ Memory: Luna estimates `file size + KV cache × context + 768 MB` and warns when
 - **Typed boundary.** Rust types are exported to `src/bindings` with `ts-rs` (dev dependency only). CI fails if they are stale.
 - **Errors.** Commands return `CommandError { message }`. The message is written for users; the technical error is logged in Rust.
 - **Persistence.** SQLite through `rusqlite`. Schema migrations use `PRAGMA user_version`. Settings are a single JSON row so new fields get defaults without migrations. Corrupt data is reported, never silently reset. Model files live in their own directory.
-- **Credentials.** The Home Assistant token lives in the OS credential store (Keychain, Windows Credential Manager). It never enters SQLite, logs, prompts, or the frontend.
+- **Credentials.** The Home Assistant token and cloud API keys live in the OS credential store (Keychain, Windows Credential Manager). They never enter SQLite, logs, prompts, or the frontend.
 - **Background behaviour.** Closing the window hides it. Quit is in the tray menu. Launch at login passes `--hidden` so Luna starts in the tray.
 - **Model configuration.** Everything model-specific (sampling, thinking, memory estimates) lives in the catalogue. Adding a GGUF model means adding a catalogue entry.
 
@@ -151,7 +184,8 @@ Memory: Luna estimates `file size + KV cache × context + 768 MB` and warns when
 - **Processors without AVX2.** The Windows runtime will not start on them. Luna reports that the model could not load.
 - **macOS microphone in the background.** `Info.plist` provides `NSMicrophoneUsageDescription`. A signed app is needed for a stable TCC permission. Untested.
 - **Windows microphone privacy.** Desktop apps can be blocked by "Let desktop apps access your microphone". Luna explains this when CPAL reports access denied; whether Windows reports denial or delivers silence has not been tested.
-- **macOS voice.** The Metal whisper build, the AVFoundation voice, and its completion callback have not been built or run on macOS.
+- **macOS voice.** The Metal whisper build, the voice helper, and speaker output have not been built or run on macOS.
+- **Memory during a conversation.** Whisper (about 300 MB) and the voice helper (about 465 MB) are loaded only between the wake word and the end of the conversation, but together they need about 800 MB then.
 - **Wake word accuracy.** Measured only with synthetic voices. False accepts per hour and miss rate with real voices, accents, and background noise are unknown. "Luna" is a short keyword, and custom wake words were checked only with "Jarvis"; the score and threshold in the catalogue may need tuning.
 - **Build machines** need CMake and libclang (LLVM) for whisper.cpp. GitHub's Windows and macOS runners include both.
 - **Device changes.** CPAL does not emit device-change events on all hosts.
@@ -187,11 +221,12 @@ Luna is Apache-2.0. Direct dependencies:
 | rustls, ring, rustls-platform-verifier                      | Apache-2.0 / MIT / ISC       | Yes                        |
 | keyring, mdns-sd, sysinfo, fs4, sha2, windows-sys           | MIT / Apache-2.0             | Yes                        |
 | serde, thiserror, url, log                                  | MIT / Apache-2.0             | Yes                        |
-| CPAL, tts, windows (WinRT speech)                           | Apache-2.0 / MIT             | Yes                        |
+| CPAL                                                        | Apache-2.0                   | Yes                        |
+| luna-voice helper (espeak-ng, piper-phonemize, sherpa-onnx) | GPL-3.0-or-later             | Yes, as a separate program |
 | sherpa-onnx (no-tts), ONNX Runtime, kaldi-native-fbank      | Apache-2.0 / MIT             | Yes                        |
 | whisper.cpp, ggml / whisper-rs                              | MIT / Unlicense              | Yes                        |
 | tar, bzip2 (libbz2-rs-sys)                                  | MIT / Apache-2.0             | Yes                        |
 | ts-rs, wiremock                                             | MIT / Apache-2.0             | No (tests only)            |
 | Qwen3 8B weights                                            | Apache-2.0                   | No, downloaded by the user |
 | Gemma 3 12B weights                                         | Gemma Terms of Use (not OSI) | No, downloaded by the user |
-| KWS zipformer, Silero VAD, Whisper base.en weights          | Apache-2.0, MIT, MIT         | No, downloaded by the user |
+| KWS zipformer, Silero VAD, Whisper small.en, Kokoro weights | Apache-2.0, MIT, MIT, Apache | No, downloaded by the user |

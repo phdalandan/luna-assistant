@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ModelList } from "../components/ModelList";
+import { VoiceOrb } from "../components/VoiceOrb";
 import {
   api,
   errorMessage,
@@ -43,8 +44,9 @@ export function AssistantView() {
   }, [interactions, pending, error]);
 
   const activeModelId = models?.find((model) => model.active)?.id;
+  const cloud = status?.inference === "cloud";
   useEffect(() => {
-    if (!activeModelId) return;
+    if (!activeModelId || cloud) return;
     const prepare = () => {
       api
         .prepareAssistant()
@@ -53,30 +55,29 @@ export function AssistantView() {
     prepare();
     window.addEventListener("focus", prepare);
     return () => window.removeEventListener("focus", prepare);
-  }, [activeModelId]);
+  }, [activeModelId, cloud]);
 
-  if (!models) {
+  if (!models || !status) {
     return null;
   }
   const voice = status?.voice.state ?? "off";
   const header = (
-    <Header
-      endsAt={status?.conversationEndsAt ?? null}
-      voice={voice}
-      toggle={() =>
-        api
-          .setListening(voice === "off")
-          .catch((err: unknown) => setError(errorMessage(err)))
-      }
-    />
+    <header className="assistant-header">
+      <Countdown endsAt={status?.conversationEndsAt ?? null} />
+    </header>
   );
+  // Failures are shown through the voice status, so they are not repeated here.
+  const toggleListening = () =>
+    api
+      .setListening(voice === "off")
+      .catch((err: unknown) => console.error(err));
   const problem = status?.voice.problem && (
     <p className="detail" role="status">
       {status.voice.problem}
     </p>
   );
   const activeModel = models.find((model) => model.active);
-  if (!activeModel) {
+  if (!activeModel && !cloud) {
     const installed = models.filter((model) => model.installed);
     const shown =
       installed.length > 0
@@ -139,49 +140,42 @@ export function AssistantView() {
   }
 
   const empty = interactions.length === 0 && !pending && !error;
-  const busy = voice === "processing" || voice === "responding";
 
   return (
     <section className="assistant">
       {header}
       {problem}
-      {empty ? (
-        <div className="presence">
-          <div
-            className="orb"
-            data-state={busy ? "thinking" : "idle"}
-            aria-hidden="true"
+      <div className="stage">
+        <VoiceOrb state={voice} />
+        {empty && <StatusLine status={status} />}
+      </div>
+      <div className="transcript" aria-live="polite">
+        {interactions.map((interaction) => (
+          <Exchange
+            key={interaction.id}
+            interaction={interaction}
+            respond={respond}
           />
-          <StatusLine status={status} />
-        </div>
-      ) : (
-        <div className="transcript" aria-live="polite">
-          {interactions.map((interaction) => (
-            <Exchange
-              key={interaction.id}
-              interaction={interaction}
-              respond={respond}
+        ))}
+        {pending && (
+          <div className="exchange">
+            <p className="message message-user">{pending}</p>
+            <div
+              className="orb orb-small"
+              data-state="thinking"
+              aria-label="Working"
             />
-          ))}
-          {pending && (
-            <div className="exchange">
-              <p className="message message-user">{pending}</p>
-              <div
-                className="orb orb-small"
-                data-state="thinking"
-                aria-label="Working"
-              />
-            </div>
-          )}
-          {error && (
-            <p className="message message-luna error" role="alert">
-              {error}
-            </p>
-          )}
-          <div ref={end} />
-        </div>
-      )}
+          </div>
+        )}
+        {error && (
+          <p className="message message-luna error" role="alert">
+            {error}
+          </p>
+        )}
+        <div ref={end} />
+      </div>
 
+      <MicToggle voice={voice} toggle={toggleListening} />
       <form className="composer" onSubmit={submit}>
         <input
           className="input"
@@ -215,26 +209,30 @@ const VOICE_LABELS: Record<VoiceState, string> = {
   responding: "Responding",
 };
 
-interface HeaderProps {
-  endsAt: number | null;
+/** Turns listening on or off and shows what voice is doing. */
+function MicToggle({
+  voice,
+  toggle,
+}: {
   voice: VoiceState;
   toggle: () => void;
-}
-
-function Header({ endsAt, voice, toggle }: HeaderProps) {
+}) {
+  const on = voice !== "off";
   return (
-    <header className="assistant-header">
-      <Countdown endsAt={endsAt} />
-      <button
-        className="chip"
-        type="button"
-        data-state={voice}
-        aria-pressed={voice !== "off"}
-        onClick={toggle}
-      >
-        {VOICE_LABELS[voice]}
-      </button>
-    </header>
+    <button
+      className="mic-toggle"
+      type="button"
+      data-state={voice}
+      aria-pressed={on}
+      onClick={toggle}
+    >
+      <svg viewBox="0 0 24 24" aria-hidden="true">
+        <rect x="9" y="3" width="6" height="11" rx="3" />
+        <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+        {!on && <path d="M4 4l16 16" />}
+      </svg>
+      {VOICE_LABELS[voice]}
+    </button>
   );
 }
 

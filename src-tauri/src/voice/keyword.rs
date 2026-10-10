@@ -1,6 +1,5 @@
-//! Spells a wake word in the keyword model's own word pieces, the way its sentencepiece unigram
-//! tokenizer would, so any name can be spotted without retraining. The vocabulary is read from
-//! the model's `bpe.model`, a protobuf of pieces with their log-probability scores.
+//! Spells any wake word in the keyword model's word pieces, as its sentencepiece unigram tokenizer
+//! would, using the piece scores in the model's `bpe.model` protobuf. No retraining is needed.
 use std::collections::HashMap;
 
 /// The keyword line sherpa-onnx expects, such as `▁ LU N A @WAKE`, or `None` if the name

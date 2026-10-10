@@ -13,7 +13,7 @@
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run",
-    "runtime": "node scripts/ensure-llama-server.mjs && node scripts/fetch-sherpa-onnx.mjs"
+    "runtime": "node scripts/ensure-llama-server.mjs && node scripts/fetch-sherpa-onnx.mjs && node scripts/ensure-voice-helper.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.12.2",

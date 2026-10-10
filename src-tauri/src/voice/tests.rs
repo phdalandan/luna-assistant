@@ -1,6 +1,5 @@
-//! Voice pipeline tests with real models and recordings. They need the speech models laid out
-//! as Luna installs them and 16 kHz mono WAV files, and they speak replies aloud:
-//! `LUNA_SPEECH_DIR=<models> LUNA_SPEECH_WAVS=<wavs> cargo test --release voice -- --ignored --nocapture --test-threads 1`
+//! Real-model voice tests (they speak aloud): `LUNA_SPEECH_DIR=<models> LUNA_SPEECH_WAVS=<16 kHz
+//! WAVs> cargo test --release voice -- --ignored --nocapture --test-threads 1`
 use std::path::PathBuf;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{self, SyncSender};
@@ -96,8 +95,11 @@ fn measure_wake_word_and_transcription() {
     );
     let before = resident_megabytes();
     let started = Instant::now();
-    let transcriber =
+    let mut transcriber =
         Transcriber::load(&models.join(whisper_file()), &speech.transcription).unwrap();
+    if let Ok(words) = std::env::var("LUNA_WHISPER_PROMPT") {
+        transcriber.expect_words(&words).unwrap();
+    }
     println!(
         "loaded {} in {} ms, +{} MB resident",
         whisper_file(),
@@ -145,6 +147,8 @@ struct FakeHost {
     /// When set, a request waits here until it is cancelled.
     hold: Mutex<Option<mpsc::Receiver<()>>>,
     release: Mutex<Option<mpsc::Sender<()>>>,
+    /// When each reply was requested, and when its voice was first heard.
+    replies: Mutex<Vec<(Instant, Option<Instant>)>>,
 }
 
 impl FakeHost {
@@ -156,6 +160,7 @@ impl FakeHost {
             stopped: Mutex::default(),
             hold: Mutex::default(),
             release: Mutex::default(),
+            replies: Mutex::default(),
         })
     }
 
@@ -171,6 +176,7 @@ impl FakeHost {
 impl Host for FakeHost {
     fn respond(&self, request: &str) -> String {
         self.requests.lock().unwrap().push(request.to_owned());
+        self.replies.lock().unwrap().push((Instant::now(), None));
         if let Some(hold) = self.hold.lock().unwrap().take() {
             let _ = hold.recv();
             return "Stopped.".into();
@@ -182,9 +188,23 @@ impl Host for FakeHost {
         assistant::relevance(&self.home, text)
     }
 
+    fn vocabulary(&self) -> String {
+        assistant::vocabulary(&self.home)
+    }
+
     fn cancel(&self) {
         if let Some(release) = self.release.lock().unwrap().take() {
             let _ = release.send(());
+        }
+    }
+
+    fn audio_level(&self, level: f32) {
+        let responding = self.state() == Some(VoiceState::Responding);
+        if let Some((_, heard @ None)) = self.replies.lock().unwrap().last_mut()
+            && responding
+            && level > 0.0
+        {
+            *heard = Some(Instant::now());
         }
     }
 
@@ -209,6 +229,24 @@ fn speech_files() -> SpeechFiles {
         wake_word_dir: models.join("kws"),
         speech_detection: models.join("silero_vad.onnx"),
         transcription: models.join(whisper_file()),
+        speech_output_dir: models.join("kokoro"),
+    }
+}
+
+/// The voice helper built from `voice-helper/`, or `LUNA_VOICE_HELPER`.
+fn voice_settings(wake_word: &str) -> VoiceSettings {
+    let helper = std::env::var("LUNA_VOICE_HELPER").map_or_else(
+        |_| {
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../voice-helper/target/release")
+                .join(format!("luna-voice{}", std::env::consts::EXE_SUFFIX))
+        },
+        PathBuf::from,
+    );
+    VoiceSettings {
+        wake_word: wake_word.into(),
+        voice: "af_heart".into(),
+        helper,
     }
 }
 
@@ -225,7 +263,7 @@ fn start(host: Arc<FakeHost>) -> Running {
     let thread = std::thread::spawn(move || {
         Listener::new(
             files,
-            "Luna".into(),
+            voice_settings("Luna"),
             Timing::default(),
             SAMPLE_RATE,
             host,
@@ -302,20 +340,38 @@ fn wake_word_anywhere_follow_ups_and_unrelated_speech() {
     settle(&host);
     say(&running, "chatter_then_command");
     wait_until("the request after chatter", || host.requests().len() == 8);
+    settle(&host);
 
+    let words = |text: &str| -> String {
+        text.to_lowercase()
+            .replace('%', " percent")
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|word| !word.is_empty())
+            .collect::<Vec<_>>()
+            .join(" ")
+    };
+    let heard: Vec<String> = host.requests().iter().map(|text| words(text)).collect();
     assert_eq!(
-        host.requests(),
+        heard,
         [
-            "Turn off the lights",
-            "Make it 50%.",
-            "Thanks.",
-            "Could you check the temperature in the kitchen",
-            "Thanks.",
-            "Can you turn off the lights",
-            "Thanks.",
-            "Turn off the kitchen lights",
+            "turn off the lights",
+            "make it 50 percent",
+            "thanks",
+            "check the temperature in the kitchen",
+            "thanks",
+            "can you turn off the lights",
+            "thanks",
+            "turn off the kitchen lights",
         ]
     );
+
+    for (requested, heard) in host.replies.lock().unwrap().iter() {
+        let heard = heard.expect("a reply was spoken");
+        println!(
+            "reply heard {} ms after it was ready",
+            (heard - *requested).as_millis()
+        );
+    }
 
     let started = Instant::now();
     running
@@ -392,7 +448,7 @@ fn measure_passive_listening_with_the_microphone() {
     voice
         .start(
             speech_files(),
-            "Luna".into(),
+            voice_settings("Luna"),
             Timing::default(),
             host.clone(),
         )
@@ -471,4 +527,15 @@ fn a_custom_wake_word_replaces_luna() {
     for name in ["start-Zira", "end-David", "neg_long-David"] {
         assert!(!heard(name), "{name}");
     }
+}
+
+#[test]
+#[ignore = "needs speech models"]
+fn a_large_home_vocabulary_primes_transcription_without_crashing() {
+    let speech = catalog::speech();
+    let mut transcriber =
+        Transcriber::load(&models_dir().join(whisper_file()), &speech.transcription).unwrap();
+    let names: Vec<String> = (0..300).map(|n| format!("Living Room Lamp {n}")).collect();
+    transcriber.expect_words(&names.join(", ")).unwrap();
+    transcriber.expect_words("").unwrap();
 }

@@ -1,4 +1,6 @@
-//! Local inference through the bundled llama.cpp server. One model is loaded at a time.
+//! Inference for the assistant: local through the bundled llama.cpp server, one model loaded at
+//! a time, or cloud through the OpenAI and Anthropic APIs when the user chooses Cloud.
+mod cloud;
 mod process;
 mod server;
 
@@ -11,14 +13,15 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::{Mutex, watch};
 
-use crate::models::ChatOptions;
+use crate::models::{ChatOptions, CloudProvider};
+pub use cloud::{CloudClient, CloudFailure, DEFAULT_TIMEOUT, Endpoints};
 use process::PidFile;
 use server::Server;
 
 /// Unloading after inactivity keeps memory free while Luna sits idle.
 const IDLE_UNLOAD: Duration = Duration::from_secs(5 * 60);
 /// Replies are one sentence or a tool call, so a low cap bounds runaway generation.
-const MAX_RESPONSE_TOKENS: u32 = 256;
+pub(crate) const MAX_RESPONSE_TOKENS: u32 = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum InferenceError {
@@ -34,6 +37,13 @@ pub enum InferenceError {
     Request(String),
     #[error("unexpected inference response: {0}")]
     InvalidResponse(String),
+    #[error("{name} request failed: {failure:?} ({detail})", name = .provider.name())]
+    Cloud {
+        provider: CloudProvider,
+        failure: CloudFailure,
+        /// Status and error type only. Provider messages can quote part of the API key.
+        detail: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -164,8 +174,8 @@ impl ChatMessage {
         }
     }
 
-    /// OpenAI-compatible message format used by the llama.cpp server.
-    fn to_wire(&self) -> Value {
+    /// OpenAI-compatible message format used by the llama.cpp server and OpenAI.
+    pub(crate) fn to_wire(&self) -> Value {
         let role = match self.role {
             Role::System => "system",
             Role::User => "user",
@@ -195,7 +205,7 @@ impl ChatMessage {
         message
     }
 
-    fn from_wire(message: &Value) -> Result<Self, InferenceError> {
+    pub(crate) fn from_wire(message: &Value) -> Result<Self, InferenceError> {
         if !message.is_object() {
             return Err(InferenceError::InvalidResponse("missing message".into()));
         }

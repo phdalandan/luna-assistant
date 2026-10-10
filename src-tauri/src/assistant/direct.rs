@@ -203,9 +203,8 @@ fn setting_action(home: &HomeModel, ids: &[String]) -> Option<Action> {
     }
 }
 
-/// Validates every request, asks for confirmation if any is sensitive, then executes.
-/// `done` replaces the result lines when every change is verified. `named` means the user said
-/// which device, so a single one needs no name in the reply.
+/// Validates, asks for confirmation if needed, then executes. `done` replaces verified results;
+/// `named` means the user said which device, so a single one is not named again.
 pub async fn run<A: HomeApi>(
     home: &Home<'_, A>,
     memory: &mut Memory,

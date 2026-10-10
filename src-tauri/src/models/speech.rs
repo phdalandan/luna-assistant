@@ -38,14 +38,16 @@ pub struct SpeechCatalog {
     pub wake_word: KeywordModel,
     pub speech_detection: VadModel,
     pub transcription: TranscriptionModel,
+    pub speech_output: SpeechOutputModel,
 }
 
 impl SpeechCatalog {
-    pub fn files(&self) -> [&DownloadFile; 3] {
+    pub fn files(&self) -> [&DownloadFile; 4] {
         [
             &self.wake_word.archive,
             &self.speech_detection.file,
             &self.transcription.file,
+            &self.speech_output.archive,
         ]
     }
 }
@@ -96,4 +98,50 @@ pub struct TranscriptionModel {
     pub file: DownloadFile,
     pub license: String,
     pub language: String,
+}
+
+/// Kokoro speech synthesis, run by the separate GPL voice helper. The archive's English files and
+/// espeak-ng data are extracted; the voices are speakers within one model.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechOutputModel {
+    pub archive: DownloadFile,
+    pub license: String,
+    pub model: String,
+    pub voices_file: String,
+    pub tokens: String,
+    pub data_dir: String,
+    pub speed: f32,
+    pub voices: Vec<Voice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Voice {
+    pub id: String,
+    pub name: String,
+    pub accent: String,
+    pub speaker: i32,
+    pub lexicon: String,
+    pub lang: String,
+}
+
+impl SpeechOutputModel {
+    pub fn extracted_files(&self) -> Vec<&str> {
+        let mut files = vec![
+            self.model.as_str(),
+            self.voices_file.as_str(),
+            self.tokens.as_str(),
+        ];
+        for voice in &self.voices {
+            if !files.contains(&voice.lexicon.as_str()) {
+                files.push(&voice.lexicon);
+            }
+        }
+        files
+    }
+
+    pub fn voice(&self, id: &str) -> Option<&Voice> {
+        self.voices.iter().find(|voice| voice.id == id)
+    }
 }

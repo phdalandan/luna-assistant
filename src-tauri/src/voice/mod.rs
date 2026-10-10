@@ -1,13 +1,12 @@
-//! Voice interaction: wake word, speech capture, transcription, and spoken replies.
-//! Audio stays in memory on this device and is discarded as soon as it is no longer needed.
-//! While passive, only the wake word detector runs. Speech detection and transcription are
-//! loaded when Luna is addressed and dropped when the conversation ends.
+//! Voice: wake word, capture, transcription, and spoken replies. Audio stays in memory and only
+//! the wake word detector runs while passive; the other models load only during a conversation.
 mod address;
 mod buffer;
 mod capture;
 mod conversation;
 mod keyword;
 mod listener;
+mod playback;
 mod speak;
 mod transcribe;
 mod wake;
@@ -29,6 +28,7 @@ use capture::{AudioSink, Microphone};
 pub use conversation::Timing;
 pub use keyword::is_valid_name as is_valid_wake_word;
 use listener::Listener;
+pub use speak::bundled_helper;
 
 /// All voice processing runs on 16 kHz mono audio.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -65,8 +65,12 @@ pub trait Host: Send + Sync + 'static {
     fn respond(&self, request: &str) -> String;
     /// Whether something said without Luna's name is meant for her.
     fn relevance(&self, text: &str) -> Relevance;
+    /// Names of rooms and devices in the home, so transcription spells them correctly.
+    fn vocabulary(&self) -> String;
     /// Cancels a request in progress, if any.
     fn cancel(&self);
+    /// How loud the microphone is, from 0 to 1, a few times a second while listening.
+    fn audio_level(&self, level: f32);
     fn state_changed(&self, state: VoiceState);
     /// Listening stopped by itself, for example because the microphone was disconnected.
     fn stopped(&self, error: VoiceError);
@@ -78,6 +82,16 @@ pub struct SpeechFiles {
     pub wake_word_dir: PathBuf,
     pub speech_detection: PathBuf,
     pub transcription: PathBuf,
+    pub speech_output_dir: PathBuf,
+}
+
+/// The user's voice choices and where the voice helper is.
+#[derive(Debug, Clone)]
+pub struct VoiceSettings {
+    pub wake_word: String,
+    /// A voice id from the catalogue, such as "af_heart".
+    pub voice: String,
+    pub helper: PathBuf,
 }
 
 enum Input {
@@ -136,7 +150,7 @@ impl Voice {
     pub fn start(
         &self,
         files: SpeechFiles,
-        wake_word: String,
+        settings: VoiceSettings,
         timing: Timing,
         host: Arc<dyn Host>,
     ) -> Result<(), VoiceError> {
@@ -164,7 +178,7 @@ impl Voice {
                 .name("luna-voice".into())
                 .spawn(move || {
                     let listener =
-                        Listener::new(files, wake_word, timing, sample_rate, host, channels);
+                        Listener::new(files, settings, timing, sample_rate, host, channels);
                     match listener {
                         Ok(listener) => {
                             let _ = ready_tx.send(Ok(()));

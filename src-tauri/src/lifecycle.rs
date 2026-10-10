@@ -3,6 +3,8 @@ use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{App, AppHandle, Manager, Window, WindowEvent, Wry};
 
+use crate::commands::AppState;
+
 /// Passed by the login item so Luna starts in the tray without opening its window.
 pub const START_HIDDEN_ARG: &str = "--hidden";
 
@@ -27,6 +29,7 @@ pub fn show_main_window(app: &AppHandle) {
     if let Err(error) = result {
         log::error!("failed to show main window: {error}");
     }
+    app.state::<AppState>().set_window_visible(true);
 }
 
 /// Closing the window keeps Luna running in the tray. Quit is in the tray menu.
@@ -36,6 +39,7 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
         if let Err(error) = window.hide() {
             log::error!("failed to hide main window: {error}");
         }
+        window.state::<AppState>().set_window_visible(false);
     }
 }
 

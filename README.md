@@ -1,6 +1,6 @@
 # Luna
 
-Luna is an open-source, privacy-first voice assistant for [Home Assistant](https://www.home-assistant.io/). It runs entirely on your computer: speech recognition, wake word detection, and language understanding never leave your machine.
+Luna is an open-source, privacy-first voice assistant for [Home Assistant](https://www.home-assistant.io/). By default it runs entirely on your computer: speech recognition, wake word detection, and language understanding never leave your machine. You can choose a cloud model from OpenAI or Anthropic instead.
 
 Say "It's too bright in the living room" or "Turn off everything downstairs except the hallway light" and Luna works out which devices you mean, checks the action is allowed, carries it out, and confirms the result.
 
@@ -44,20 +44,20 @@ The model loads when you first ask something and unloads after 5 minutes of inac
 
 ## Privacy
 
-Requests, Home Assistant data, and AI processing stay on your computer. Luna connects to the internet only to download a model you chose. The Home Assistant token is stored in the macOS Keychain or Windows Credential Manager.
+With Local selected (the default), requests, Home Assistant data, and AI processing stay on your computer, and Luna connects to the internet only to download a model you chose. With Cloud selected, the text of a request and the home data needed to interpret it (room and floor names, relevant devices and their states, and the last few turns of the conversation) are sent to the provider you chose. Audio never leaves your computer, and Luna still controls Home Assistant itself; the provider never connects to it. The Home Assistant token and API keys are stored in the macOS Keychain or Windows Credential Manager.
 
 Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tray menu to exit.
 
 ## Development
 
-Prerequisites: Node.js 22, Rust (stable), CMake, and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
+Prerequisites: Node.js 22, Rust (stable), CMake, LLVM (libclang, for the whisper.cpp bindings), and the [Tauri prerequisites](https://v2.tauri.app/start/prerequisites/) for your platform.
 
 ```sh
 npm ci
 npm run tauri dev
 ```
 
-The first run builds the bundled llama.cpp server (a few minutes). It is rebuilt only when the pinned version in `scripts/build-llama-server.sh` changes. On Windows this needs Git Bash on the `PATH`.
+The first run builds the bundled llama.cpp server (a few minutes), downloads the pinned sherpa-onnx libraries, and builds the voice helper. Each is rebuilt only when its pinned version or source changes. On Windows this needs Git Bash on the `PATH`.
 
 Checks:
 
@@ -106,4 +106,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [CLAUDE.md](CLAUDE.md). Security issu
 
 ## Licence
 
-[Apache-2.0](LICENSE)
+[Apache-2.0](LICENSE), except the voice helper in `voice-helper/`, which is [GPL-3.0-or-later](voice-helper/LICENSE) because it links espeak-ng. It is built and shipped as a separate program.

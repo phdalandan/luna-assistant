@@ -8,7 +8,7 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
-import { mockBackend } from "../test/backend";
+import { mockBackend, settings } from "../test/backend";
 import { SettingsView } from "./SettingsView";
 
 describe("SettingsView", () => {
@@ -135,6 +135,114 @@ describe("SettingsView", () => {
       expect(
         calls.find((call) => call.cmd === "save_settings")?.args,
       ).toMatchObject({ settings: { wakeWord: "Jarvis" } }),
+    );
+  });
+
+  it("shows the connection as a badge beside the heading", async () => {
+    mockBackend();
+    render(<SettingsView />);
+    const badge = await screen.findByText("Connected");
+    expect(badge.getAttribute("data-tone")).toBe("success");
+    expect(badge.closest("legend")?.textContent).toContain("Home Assistant");
+    expect(screen.getByLabelText("Address")).toBeTruthy();
+  });
+
+  it("chooses a voice and saves it with the form", async () => {
+    const calls = mockBackend({
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
+    render(<SettingsView />);
+    const voice = await screen.findByLabelText("Voice");
+    await screen.findByRole("option", { name: "George (UK)" });
+    fireEvent.change(voice, { target: { value: "bm_george" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.cmd === "save_settings")?.args,
+      ).toMatchObject({ settings: { voice: "bm_george" } }),
+    );
+  });
+
+  it("switches to cloud immediately and shows the cloud settings", async () => {
+    const calls = mockBackend();
+    render(<SettingsView />);
+    expect(await screen.findByText("Qwen3 8B")).toBeTruthy();
+    const local = screen.getByRole("radio", { name: "Local" });
+    expect(local.getAttribute("aria-checked")).toBe("true");
+
+    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
+
+    expect(
+      calls.find((call) => call.cmd === "set_inference_mode")?.args,
+    ).toEqual({ mode: "cloud" });
+    expect(screen.queryByText("Qwen3 8B")).toBeNull();
+    expect(screen.queryByLabelText("Context length")).toBeNull();
+    expect(
+      screen.getByText(
+        "Commands and relevant home data are sent to your selected provider.",
+      ),
+    ).toBeTruthy();
+    expect(
+      await screen.findByRole("option", { name: "GPT-6 Luna" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("option", { name: "Claude Haiku 5.5" }),
+    ).toBeNull();
+    expect(screen.getByRole("button", { name: "Save" })).toHaveProperty(
+      "disabled",
+      true,
+    );
+  });
+
+  it("saves an API key for the selected provider without showing it again", async () => {
+    const calls = mockBackend({
+      get_settings: () => ({ ...settings, inference: "cloud" }),
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
+    render(<SettingsView />);
+    fireEvent.change(await screen.findByLabelText("Provider"), {
+      target: { value: "anthropic" },
+    });
+    await screen.findByRole("option", { name: "Claude Sonnet 5" });
+    fireEvent.change(screen.getByLabelText("Model"), {
+      target: { value: "claude-sonnet-5" },
+    });
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "secret-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.cmd === "save_settings")?.args,
+      ).toMatchObject({
+        apiKey: "secret-key",
+        settings: {
+          cloudProvider: "anthropic",
+          anthropicModel: "claude-sonnet-5",
+        },
+      }),
+    );
+    const key = screen.getByLabelText("API key") as HTMLInputElement;
+    await waitFor(() => expect(key.value).toBe(""));
+    expect(key.type).toBe("password");
+    expect(key.placeholder).toBe("Saved");
+  });
+
+  it("removes a saved API key", async () => {
+    const calls = mockBackend({
+      get_settings: () => ({ ...settings, inference: "cloud" }),
+      saved_api_keys: () => ["openai"],
+    });
+    render(<SettingsView />);
+    fireEvent.click(await screen.findByRole("button", { name: "Remove" }));
+    expect(calls.find((call) => call.cmd === "remove_api_key")?.args).toEqual({
+      provider: "openai",
+    });
+    await waitFor(() =>
+      expect(
+        (screen.getByLabelText("API key") as HTMLInputElement).placeholder,
+      ).toBe(""),
     );
   });
 });

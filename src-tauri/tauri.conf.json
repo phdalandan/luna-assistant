@@ -48,6 +48,6 @@
         "installMode": "currentUser"
       }
     },
-    "externalBin": ["binaries/llama-server"]
+    "externalBin": ["binaries/llama-server", "binaries/luna-voice"]
   }
 }

@@ -17,13 +17,16 @@ use serde_json::Value;
 use tokio_util::sync::CancellationToken;
 
 use crate::actions::{self, ControlRequest, ExecutionReport};
+use crate::credentials::AccessToken;
 use crate::history::{Interaction, now_millis};
 use crate::home_assistant::{HomeApi, HomeCache};
 use crate::inference::{
-    ChatMessage, Completion, Engine, FunctionCall, InferenceError, ModelSpec, Role, Timings,
-    ToolCall, Warmup,
+    ChatMessage, CloudClient, Completion, Engine, FunctionCall, InferenceError, ModelSpec, Role,
+    Timings, ToolCall, Warmup,
 };
+use crate::models::CloudModel;
 pub use relevance::{Relevance, classify as relevance};
+pub use route::vocabulary;
 pub use session::{CONVERSATION_LIFETIME, Memory, Session};
 use session::{MAX_REFERENCED, Turn};
 use tools::ToolRequest;
@@ -82,6 +85,8 @@ pub struct Metrics {
     pub route: Route,
     pub passes: u32,
     pub inference: Timings,
+    /// Wall time spent waiting for the model, including network time for cloud providers.
+    pub inference_time: Duration,
     pub service_time: Duration,
     pub verify_time: Duration,
     pub total: Duration,
@@ -99,11 +104,12 @@ impl fmt::Display for Metrics {
         let inference = &self.inference;
         write!(
             f,
-            "route {:?}, total {} ms, {} model passes, prompt {} tokens ({} cached) in {:.0} ms, \
-             generated {} tokens in {:.0} ms, service calls {} ms, verification {} ms",
+            "route {:?}, total {} ms, {} model passes in {} ms, prompt {} tokens ({} cached) \
+             in {:.0} ms, generated {} tokens in {:.0} ms, service calls {} ms, verification {} ms",
             self.route,
             self.total.as_millis(),
             self.passes,
+            self.inference_time.as_millis(),
             inference.prompt_tokens,
             inference.cached_tokens,
             inference.prompt_ms,
@@ -136,7 +142,7 @@ impl Reply {
     }
 }
 
-/// Something that can answer a chat request. Production always uses the embedded engine.
+/// Something that can answer a chat request. Production uses the provider the user selected.
 pub trait Chat {
     fn chat(
         &self,
@@ -145,18 +151,29 @@ pub trait Chat {
     ) -> impl Future<Output = Result<Completion, InferenceError>> + Send;
 }
 
-pub struct EngineChat<'a> {
-    pub engine: &'a Engine,
-    pub spec: &'a ModelSpec,
+/// The selected inference provider. Only it answers; another is never used in its place.
+pub enum Provider<'a> {
+    Local {
+        engine: &'a Engine,
+        spec: ModelSpec,
+    },
+    Cloud {
+        client: &'a CloudClient,
+        model: &'static CloudModel,
+        key: AccessToken,
+    },
 }
 
-impl Chat for EngineChat<'_> {
+impl Chat for Provider<'_> {
     async fn chat(
         &self,
         messages: &[ChatMessage],
         tools: &Value,
     ) -> Result<Completion, InferenceError> {
-        self.engine.chat(self.spec, messages, tools).await
+        match self {
+            Self::Local { engine, spec } => engine.chat(spec, messages, tools).await,
+            Self::Cloud { client, model, key } => client.chat(model, key, messages, tools).await,
+        }
     }
 }
 
@@ -250,12 +267,29 @@ async fn ask_model<A: HomeApi>(
     let mut notes: Vec<String> = Vec::new();
 
     for _ in 0..MAX_STEPS {
-        let completion = tokio::select! {
+        let started = Instant::now();
+        let result = tokio::select! {
             biased;
-            () = cancel.cancelled() => return Err(AssistantError::Cancelled),
-            completion = model.chat(&messages, &tools) => completion?,
+            () = cancel.cancelled() => Err(AssistantError::Cancelled),
+            completion = model.chat(&messages, &tools) => completion.map_err(AssistantError::from),
+        };
+        reply.metrics.inference_time += started.elapsed();
+        let completion = match result {
+            Ok(completion) => completion,
+            Err(error) => {
+                memory.record(turn);
+                if reply.results.is_empty() || error == AssistantError::Cancelled {
+                    return Err(error);
+                }
+                // Verified actions are still reported, so the user never repeats them.
+                log::error!("model failed after actions were executed: {error}");
+                notes.append(&mut reply.results);
+                reply.text = notes.join(" ");
+                return Ok(reply);
+            }
         };
         reply.metrics.passes += 1;
+
         reply.metrics.inference.add(completion.timings);
         let message = completion.message;
         if message.tool_calls.is_empty() {

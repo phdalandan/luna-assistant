@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use rusqlite::Connection;
@@ -5,16 +6,16 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::assistant::{self, CONVERSATION_LIFETIME, EngineChat, Home, Session};
+use crate::assistant::{self, CONVERSATION_LIFETIME, Home, Provider, Session};
 use crate::credentials::{self, AccessToken};
 use crate::error::{AppError, CommandError};
 use crate::history::{self, Interaction};
 use crate::home_assistant::discovery::{self, DiscoveredInstance};
 use crate::home_assistant::{ConnectionStatus, HomeAssistant};
-use crate::inference::{Engine, EngineStatus, ModelSpec, Warmup};
+use crate::inference::{CloudClient, Engine, EngineStatus, ModelSpec, Warmup};
 use crate::listening::{self, VoiceStatus};
-use crate::models::{ModelInfo, ModelManager, VoiceModelsInfo};
-use crate::settings::{self, Settings};
+use crate::models::{CloudProvider, ModelInfo, ModelManager, VoiceModelsInfo, catalog};
+use crate::settings::{self, InferenceMode, Settings};
 use crate::voice::Voice;
 
 const VISIBLE_HISTORY: usize = 30;
@@ -24,11 +25,14 @@ pub struct AppState {
     pub home_assistant: HomeAssistant,
     pub engine: Engine,
     pub models: Arc<ModelManager>,
+    cloud: CloudClient,
     session: Session,
     pub voice: Voice,
     voice_status: Mutex<VoiceStatus>,
     /// When the conversation will be cleared if nothing else is asked, in Unix milliseconds.
     conversation_ends_at: Mutex<Option<i64>>,
+    /// Whether Luna's window is showing, so nothing is sent to it while hidden.
+    window_visible: AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -37,6 +41,7 @@ pub struct AppState {
 pub struct Status {
     pub home_assistant: ConnectionStatus,
     pub engine: EngineStatus,
+    pub inference: InferenceMode,
     pub voice: VoiceStatus,
     /// When the conversation resets, in Unix milliseconds, or `None` when there is none.
     #[cfg_attr(test, ts(type = "number | null"))]
@@ -44,16 +49,23 @@ pub struct Status {
 }
 
 impl AppState {
-    pub fn new(db: Connection, engine: Engine, models: Arc<ModelManager>) -> Self {
+    pub fn new(
+        db: Connection,
+        engine: Engine,
+        models: Arc<ModelManager>,
+        cloud: CloudClient,
+    ) -> Self {
         Self {
             db: Mutex::new(db),
             home_assistant: HomeAssistant::default(),
             engine,
             models,
+            cloud,
             session: Session::default(),
             voice: Voice::default(),
             voice_status: Mutex::default(),
             conversation_ends_at: Mutex::default(),
+            window_visible: AtomicBool::new(false),
         }
     }
 
@@ -70,6 +82,13 @@ impl AppState {
         Status {
             home_assistant: self.home_assistant.status(),
             engine: self.engine.status(),
+            inference: self
+                .settings()
+                .map(|settings| settings.inference)
+                .unwrap_or_else(|error| {
+                    log::error!("cannot read the inference mode: {error}");
+                    InferenceMode::default()
+                }),
             voice: lock(&self.voice_status).clone(),
             conversation_ends_at: *lock(&self.conversation_ends_at),
         }
@@ -81,6 +100,14 @@ impl AppState {
         let changed = *current != status;
         *current = status;
         changed
+    }
+
+    pub fn window_visible(&self) -> bool {
+        self.window_visible.load(Ordering::Relaxed)
+    }
+
+    pub fn set_window_visible(&self, visible: bool) {
+        self.window_visible.store(visible, Ordering::Relaxed);
     }
 
     pub fn pending_confirmation(&self) -> Option<i64> {
@@ -96,15 +123,11 @@ impl AppState {
         end_conversation_when_idle(app);
         let text = text.trim();
         let settings = self.settings()?;
-        let spec = self.model_spec(&settings)?;
+        let model = self.provider(&settings)?;
         let history = history::recent(&self.db(), VISIBLE_HISTORY)?;
         let cancel = self.session.begin()?;
         let _finished = SessionGuard(&self.session);
 
-        let model = EngineChat {
-            engine: &self.engine,
-            spec: &spec,
-        };
         let mut memory = self.session.memory();
         let result =
             assistant::respond(&model, self.home(), &history, &mut memory, text, &cancel).await;
@@ -163,6 +186,55 @@ impl AppState {
         }
     }
 
+    /// Saves where inference runs. A request in progress stops before its next model pass;
+    /// actions being executed are never interrupted. Returns whether the mode changed.
+    pub fn save_inference_mode(&self, mode: InferenceMode) -> Result<bool, AppError> {
+        let current = self.settings()?;
+        if current.inference == mode {
+            return Ok(false);
+        }
+        let settings = Settings {
+            inference: mode,
+            ..current
+        };
+        settings::save(&self.db(), &settings)?;
+        self.session.cancel();
+        Ok(true)
+    }
+
+    /// Releases the local model in Cloud mode, or loads the selected one in Local mode.
+    pub async fn match_engine_to_mode(&self) -> Result<(), AppError> {
+        let settings = self.settings()?;
+        match settings.inference {
+            InferenceMode::Cloud => self.engine.unload().await,
+            InferenceMode::Local if settings.active_model.is_some() => {
+                self.engine.load(&self.model_spec(&settings)?).await?;
+            }
+            InferenceMode::Local => {}
+        }
+        Ok(())
+    }
+
+    /// The provider for the saved choice. A missing key or model is an error, never a fallback.
+    fn provider(&self, settings: &Settings) -> Result<Provider<'_>, AppError> {
+        if settings.inference == InferenceMode::Local {
+            return Ok(Provider::Local {
+                engine: &self.engine,
+                spec: self.model_spec(settings)?,
+            });
+        }
+        let provider = settings.cloud_provider;
+        let id = settings.cloud_model(provider);
+        let model = catalog::cloud_model(provider, id)
+            .ok_or_else(|| AppError::UnknownCloudModel(provider, id.to_owned()))?;
+        let key = credentials::load_api_key(provider)?.ok_or(AppError::NoApiKey(provider))?;
+        Ok(Provider::Cloud {
+            client: &self.cloud,
+            model,
+            key,
+        })
+    }
+
     fn model_spec(&self, settings: &Settings) -> Result<ModelSpec, AppError> {
         let id = settings
             .active_model
@@ -191,23 +263,23 @@ pub fn get_settings(state: State<'_, AppState>) -> Result<Settings, CommandError
     Ok(state.settings()?)
 }
 
-/// Saves the form. A new access token is stored only in the OS credential store.
+/// Saves the form. A new access token or API key is stored only in the OS credential store.
 #[tauri::command]
 pub fn save_settings(
     app: AppHandle,
     state: State<'_, AppState>,
     settings: Settings,
     token: Option<String>,
+    api_key: Option<String>,
 ) -> Result<Settings, CommandError> {
     let previous = state.settings()?;
-    let settings = Settings {
-        active_model: previous.active_model.clone(),
-        listening: previous.listening,
-        ..settings.validated()?
-    };
+    let settings = Settings::from_form(settings, &previous)?;
     let token = token.and_then(AccessToken::new);
     if let Some(token) = &token {
         credentials::save_home_assistant_token(token)?;
+    }
+    if let Some(key) = api_key.and_then(AccessToken::new) {
+        credentials::save_api_key(settings.cloud_provider, &key)?;
     }
     if settings.home_assistant_url.is_empty() {
         credentials::delete_home_assistant_token()?;
@@ -222,8 +294,10 @@ pub fn save_settings(
         let engine = state.engine.clone();
         tauri::async_runtime::spawn(async move { engine.unload().await });
     }
-    if settings.wake_word != previous.wake_word && settings.listening {
-        // Listening restarts with the new wake word, away from the main thread.
+    let voice_changed =
+        settings.wake_word != previous.wake_word || settings.voice != previous.voice;
+    if voice_changed && settings.listening {
+        // Listening restarts with the new wake word or voice, away from the main thread.
         tauri::async_runtime::spawn_blocking(move || {
             if let Err(error) = listening::start(&app) {
                 log::warn!("listening did not restart with the new wake word: {error}");
@@ -236,6 +310,58 @@ pub fn save_settings(
 #[tauri::command]
 pub fn has_home_assistant_token() -> Result<bool, CommandError> {
     Ok(credentials::load_home_assistant_token()?.is_some())
+}
+
+/// Which providers have a saved API key. Keys themselves never leave Rust.
+#[tauri::command]
+pub fn saved_api_keys() -> Result<Vec<CloudProvider>, CommandError> {
+    let mut saved = Vec::new();
+    for provider in CloudProvider::ALL {
+        if credentials::load_api_key(provider)?.is_some() {
+            saved.push(provider);
+        }
+    }
+    Ok(saved)
+}
+
+#[tauri::command]
+pub fn remove_api_key(provider: CloudProvider) -> Result<(), CommandError> {
+    Ok(credentials::delete_api_key(provider)?)
+}
+
+/// A cloud model for the choice in Settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct CloudModelOption {
+    pub provider: CloudProvider,
+    pub id: String,
+    pub name: String,
+}
+
+#[tauri::command]
+pub fn list_cloud_models() -> Vec<CloudModelOption> {
+    catalog::cloud_models()
+        .iter()
+        .map(|model| CloudModelOption {
+            provider: model.provider,
+            id: model.id.clone(),
+            name: model.name.clone(),
+        })
+        .collect()
+}
+
+/// Switches between Local and Cloud without restarting Luna or clearing the conversation.
+#[tauri::command]
+pub async fn set_inference_mode(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: InferenceMode,
+) -> Result<(), CommandError> {
+    if state.save_inference_mode(mode)? {
+        crate::emit(&app, crate::STATUS_EVENT, state.status());
+        state.match_engine_to_mode().await?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -289,6 +415,9 @@ pub async fn select_model(state: State<'_, AppState>, id: String) -> Result<(), 
     };
     settings::save(&state.db(), &settings)?;
     state.models.notify_changed();
+    if settings.inference == InferenceMode::Cloud {
+        return Ok(());
+    }
     state.session.cancel();
     let spec = state.model_spec(&settings)?;
     Ok(state.engine.load(&spec).await?)
@@ -300,11 +429,14 @@ const HOME_ASSISTANT_WAIT: std::time::Duration = std::time::Duration::from_secs(
 /// Failures are logged; the model status already tells the user if loading failed.
 #[tauri::command]
 pub async fn prepare_assistant(state: State<'_, AppState>) -> Result<(), CommandError> {
-    let spec = match state
-        .settings()
-        .and_then(|settings| state.model_spec(&settings))
-    {
+    let spec = match state.settings().and_then(|settings| {
+        if settings.inference == InferenceMode::Cloud {
+            return Err(AppError::NoActiveModel);
+        }
+        state.model_spec(&settings)
+    }) {
         Ok(spec) => spec,
+        // Nothing to load: no model is chosen, or a cloud provider answers instead.
         Err(AppError::NoActiveModel) => return Ok(()),
         Err(error) => {
             log::warn!("cannot prepare the assistant: {error}");
@@ -431,6 +563,29 @@ pub async fn set_listening(app: AppHandle, enabled: bool) -> Result<(), CommandE
     Ok(listening::set_enabled_in_background(app, enabled).await?)
 }
 
+/// A voice Luna can speak with, for the choice in Settings.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS), ts(export))]
+pub struct VoiceOption {
+    pub id: String,
+    pub name: String,
+    pub accent: String,
+}
+
+#[tauri::command]
+pub fn list_voices() -> Vec<VoiceOption> {
+    crate::models::catalog::speech()
+        .speech_output
+        .voices
+        .iter()
+        .map(|voice| VoiceOption {
+            id: voice.id.clone(),
+            name: voice.name.clone(),
+            accent: voice.accent.clone(),
+        })
+        .collect()
+}
+
 #[tauri::command]
 pub fn get_voice_models(state: State<'_, AppState>) -> VoiceModelsInfo {
     state.models.voice().info()
@@ -459,4 +614,88 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::inference::{DEFAULT_TIMEOUT, Endpoints};
+    use crate::models::{DownloadProgress, ModelError, ModelEvents, ModelStore};
+
+    struct NoEvents;
+
+    impl ModelEvents for NoEvents {
+        fn changed(&self) {}
+        fn progress(&self, _: DownloadProgress) {}
+    }
+
+    fn state(name: &str) -> AppState {
+        let dir = std::env::temp_dir().join(format!("luna-{name}-{}", std::process::id()));
+        let store = ModelStore::open(dir.join("models")).unwrap();
+        let models =
+            ModelManager::new(catalog::models().to_vec(), store, Arc::new(NoEvents)).unwrap();
+        let engine = Engine::new(
+            PathBuf::from("/nonexistent/llama-server"),
+            dir.join("llama-server.pid"),
+            dir.join("prompt-cache"),
+        );
+        let db = crate::db::open_in_memory().unwrap();
+        let cloud = CloudClient::new(Endpoints::default(), DEFAULT_TIMEOUT).unwrap();
+        AppState::new(db, engine, Arc::new(models), cloud)
+    }
+
+    #[tokio::test]
+    async fn switching_to_cloud_stops_the_request_and_releases_the_local_model() {
+        let state = state("to-cloud");
+        let request = state.session.begin().unwrap();
+
+        assert!(state.save_inference_mode(InferenceMode::Cloud).unwrap());
+        state.match_engine_to_mode().await.unwrap();
+
+        assert!(request.is_cancelled());
+        assert_eq!(state.settings().unwrap().inference, InferenceMode::Cloud);
+        assert_eq!(state.status().inference, InferenceMode::Cloud);
+        assert_eq!(state.engine.status(), EngineStatus::Idle);
+        assert!(!state.save_inference_mode(InferenceMode::Cloud).unwrap());
+    }
+
+    #[tokio::test]
+    async fn switching_to_local_loads_the_selected_model() {
+        let state = state("to-local");
+        state.save_inference_mode(InferenceMode::Cloud).unwrap();
+
+        state.save_inference_mode(InferenceMode::Local).unwrap();
+        state.match_engine_to_mode().await.unwrap();
+        assert_eq!(state.engine.status(), EngineStatus::Idle);
+
+        let settings = Settings {
+            active_model: Some("qwen3-8b".into()),
+            ..state.settings().unwrap()
+        };
+        settings::save(&state.db(), &settings).unwrap();
+        let result = state.match_engine_to_mode().await;
+        assert!(matches!(
+            result,
+            Err(AppError::Model(ModelError::NotInstalled(id))) if id == "qwen3-8b"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cloud_mode_never_falls_back_to_the_local_model() {
+        let state = state("no-fallback");
+        let settings = Settings {
+            inference: InferenceMode::Cloud,
+            anthropic_model: "retired-model".into(),
+            cloud_provider: CloudProvider::Anthropic,
+            active_model: Some("qwen3-8b".into()),
+            ..Settings::default()
+        };
+        let result = state.provider(&settings);
+        assert!(matches!(
+            result,
+            Err(AppError::UnknownCloudModel(CloudProvider::Anthropic, _))
+        ));
+    }
 }

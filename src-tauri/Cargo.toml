@@ -37,7 +37,6 @@ thiserror = "2.0.21"
 tokio = { version = "1.53.2", features = ["sync", "time", "macros", "rt", "net", "process", "io-util", "fs", "signal"] }
 tokio-tungstenite = { version = "0.30.0", features = ["__rustls-tls"] }
 tokio-util = "0.7.19"
-tts = { version = "0.26.3", default-features = false }
 url = "2.5.8"
 whisper-rs = "0.16.0"
 
@@ -48,6 +47,7 @@ whisper-rs = { version = "0.16.0", features = ["metal"] }
 tauri-build = { version = "2.7", features = [] }
 
 [dev-dependencies]
+keyring-core = "1.0.0"
 tokio = { version = "1.53.2", features = ["test-util", "macros", "rt"] }
 ts-rs = "12.0.1"
 wiremock = "0.6.5"

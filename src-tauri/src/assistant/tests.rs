@@ -1,11 +1,15 @@
 use std::sync::Mutex;
 
 use serde_json::json;
+use wiremock::matchers::{method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 use super::*;
 use crate::home_assistant::model::fixtures::{large_home, state};
 use crate::home_assistant::model::{Home as HomeModel, StateEntry};
 use crate::home_assistant::{HaError, ServiceCall};
+use crate::inference::{DEFAULT_TIMEOUT, Endpoints};
+use crate::models::{CloudProvider, catalog};
 
 /// Applies the result of each service call to the cache, like Home Assistant's state events.
 struct FakeHomeAssistant<'a> {
@@ -818,8 +822,243 @@ fn final_text_removes_reasoning_and_em_dashes() {
     );
 }
 
+fn cloud_client(server: &MockServer) -> CloudClient {
+    let endpoints = Endpoints {
+        openai: format!("{}/openai", server.uri()),
+        anthropic: format!("{}/anthropic", server.uri()),
+    };
+    CloudClient::new(endpoints, DEFAULT_TIMEOUT).unwrap()
+}
+
+fn cloud(client: &CloudClient, provider: CloudProvider) -> Provider<'_> {
+    let id = catalog::default_cloud_model(provider);
+    Provider::Cloud {
+        client,
+        model: catalog::cloud_model(provider, &id).unwrap(),
+        key: AccessToken::new("test-key".into()).unwrap(),
+    }
+}
+
+fn anthropic_tool_use(arguments: Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "content": [{"type": "tool_use", "id": "toolu_1", "name": "control", "input": arguments}],
+        "usage": {"input_tokens": 1200, "output_tokens": 30}
+    }))
+}
+
+fn openai_reply(message: Value) -> ResponseTemplate {
+    ResponseTemplate::new(200).set_body_json(json!({
+        "choices": [{"message": message}],
+        "usage": {"prompt_tokens": 1200, "completion_tokens": 30}
+    }))
+}
+
+async fn sent_bodies(server: &MockServer) -> Vec<Value> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| request.body_json().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn cloud_tool_calls_are_validated_and_executed_locally() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/anthropic"))
+        .respond_with(anthropic_tool_use(json!({"action": "turn_off",
+            "target": {"floors": ["downstairs"], "domains": ["light"], "exclude_entities": ["light.hallway"]}})))
+        .mount(&server)
+        .await;
+    let client = cloud_client(&server);
+    let conversation = Conversation::new();
+
+    let reply = conversation
+        .ask_with(
+            &cloud(&client, CloudProvider::Anthropic),
+            &conversation.api(),
+            "Turn off the lights downstairs except the hallway",
+        )
+        .await;
+
+    assert_eq!(reply.text, "Kitchen and living room lamp are off.");
+    assert_eq!(reply.metrics.passes, 1);
+    assert_eq!(conversation.state("light.kitchen"), "off");
+    assert_eq!(conversation.state("light.hallway"), "on");
+    let body = &sent_bodies(&server).await[0];
+    let tools: Vec<_> = body["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].clone())
+        .collect();
+    assert_eq!(tools, ["get_states", "control"]);
+    assert!(!body.to_string().contains("test-key"));
+}
+
+#[tokio::test]
+async fn cloud_calls_for_unknown_devices_change_nothing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(openai_reply(json!({"role": "assistant", "content": null,
+            "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "control",
+                "arguments": "{\"action\":\"turn_on\",\"target\":{\"entities\":[\"light.made_up\"]}}"}}]})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(openai_reply(
+            json!({"role": "assistant", "content": "Which light did you mean?"}),
+        ))
+        .mount(&server)
+        .await;
+    let client = cloud_client(&server);
+    let conversation = Conversation::new();
+    let api = conversation.api();
+
+    let reply = conversation
+        .ask_with(
+            &cloud(&client, CloudProvider::OpenAi),
+            &api,
+            "Turn on the reading nook light",
+        )
+        .await;
+
+    assert_eq!(reply.text, "Which light did you mean?");
+    assert!(api.calls.lock().unwrap().is_empty());
+    let second = &sent_bodies(&server).await[1];
+    let result = second["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(result["role"], "tool");
+    assert!(result["content"].as_str().unwrap().starts_with("Rejected"));
+}
+
+#[tokio::test]
+async fn a_provider_failure_after_an_action_reports_it_without_repeating_it() {
+    let conversation = Conversation::new();
+    let mut calls = tool_call(
+        "control",
+        json!({"action": "turn_on", "target": {"entities": ["light.front_porch"]}}),
+    );
+    calls.tool_calls.push(ToolCall {
+        id: "call-2".into(),
+        function: FunctionCall {
+            name: "get_states".into(),
+            arguments: json!({"target": {"entities": ["sensor.time"]}}),
+        },
+    });
+    let model = ScriptedModel::new(vec![calls]);
+    let api = conversation.api();
+
+    let reply = conversation
+        .ask_after(
+            &model,
+            &api,
+            &[],
+            "Turn on the porch light and check the clock",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(model.passes(), 2);
+    assert!(reply.text.contains("Front Porch"), "{}", reply.text);
+    assert_eq!(api.calls.lock().unwrap().len(), 1);
+    assert_eq!(conversation.state("light.front_porch"), "on");
+    assert_eq!(conversation.memory().last_action[0].id, "light.front_porch");
+}
+
+#[tokio::test]
+async fn switching_providers_keeps_the_conversation() {
+    let conversation = Conversation::new();
+    let local = ScriptedModel::new(vec![tool_call(
+        "control",
+        json!({"action": "turn_off", "target": {"floors": ["downstairs"], "domains": ["light"], "exclude_entities": ["light.hallway"]}}),
+    )]);
+    let request = "Turn off the lights downstairs except the hallway";
+    let first = conversation.ask(&local, request).await;
+    let history = [Interaction {
+        id: 1,
+        created_at: now_millis(),
+        request: request.into(),
+        response: first.text.clone(),
+        results: Vec::new(),
+        awaiting_confirmation: false,
+    }];
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "content": [{"type": "text", "text": "They were turned off a moment ago."}],
+            "usage": {"input_tokens": 1200, "output_tokens": 10}
+        })))
+        .mount(&server)
+        .await;
+    let client = cloud_client(&server);
+
+    let reply = conversation
+        .ask_after(
+            &cloud(&client, CloudProvider::Anthropic),
+            &conversation.api(),
+            &history,
+            "Why did you do that to them?",
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(reply.text, "They were turned off a moment ago.");
+    let body = sent_bodies(&server).await.remove(0);
+    let messages = body["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["content"][0]["text"], request);
+    assert_eq!(
+        messages[1]["content"][0]["text"],
+        "Kitchen and living room lamp are off."
+    );
+    let context = messages[2]["content"][0]["text"].as_str().unwrap();
+    assert!(context.contains("light.kitchen"), "{context}");
+}
+
+#[tokio::test]
+async fn cancelling_stops_a_cloud_request_in_flight() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            openai_reply(json!({"role": "assistant", "content": "Late."}))
+                .set_delay(Duration::from_secs(10)),
+        )
+        .mount(&server)
+        .await;
+    let client = cloud_client(&server);
+    let conversation = Conversation::new();
+    let api = conversation.api();
+    let home = Home {
+        cache: &conversation.cache,
+        api: &api,
+        connected: true,
+    };
+    let cancel = CancellationToken::new();
+    let stop = cancel.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        stop.cancel();
+    });
+    let started = Instant::now();
+
+    let result = respond(
+        &cloud(&client, CloudProvider::OpenAi),
+        home,
+        &[],
+        &mut Memory::default(),
+        "Make the house comfortable",
+        &cancel,
+    )
+    .await;
+
+    assert_eq!(result, Err(AssistantError::Cancelled));
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
 /// Prints each tool call the real model proposes.
-struct PrintingChat<'a>(EngineChat<'a>);
+struct PrintingChat<'a>(Provider<'a>);
 
 impl Chat for PrintingChat<'_> {
     async fn chat(
@@ -872,9 +1111,9 @@ async fn cool_down() {
 #[ignore]
 async fn accuracy_with_real_model() {
     let (engine, spec) = real_engine();
-    let model = PrintingChat(EngineChat {
+    let model = PrintingChat(Provider::Local {
         engine: &engine,
-        spec: &spec,
+        spec: spec.clone(),
     });
     let runs: usize = std::env::var("LUNA_TEST_RUNS").map_or(3, |runs| runs.parse().unwrap());
     for request in [
@@ -954,9 +1193,9 @@ async fn benchmark_with_real_model() {
         warm
     );
 
-    let model = PrintingChat(EngineChat {
+    let model = PrintingChat(Provider::Local {
         engine: &engine,
-        spec: &spec,
+        spec: spec.clone(),
     });
     let mut history: Vec<Interaction> = Vec::new();
     for request in [
@@ -1026,9 +1265,9 @@ async fn benchmark_with_real_model() {
 #[ignore]
 async fn pushback_with_real_model() {
     let (engine, spec) = real_engine();
-    let model = PrintingChat(EngineChat {
+    let model = PrintingChat(Provider::Local {
         engine: &engine,
-        spec: &spec,
+        spec: spec.clone(),
     });
     // 385 also advertises turn_on and turn_off; 1 is a thermostat that only takes a temperature.
     for features in [385, 1] {
@@ -1080,9 +1319,9 @@ async fn prompt_cache_with_real_model() {
     std::fs::create_dir_all(&cache).unwrap();
     let conversation = Conversation::new();
     let api = conversation.api();
-    let model = EngineChat {
+    let model = Provider::Local {
         engine: &engine,
-        spec: &spec,
+        spec: spec.clone(),
     };
     for launch in ["without a saved prompt", "with the saved prompt"] {
         cool_down().await;
