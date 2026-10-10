@@ -138,6 +138,9 @@ jobs:
           [ "${{ matrix.bundle }}" = "nsis" ] && extension=".exe"
           "src-tauri/binaries/llama-server-${{ matrix.target }}$extension" --version
 
+      - name: Fetch sherpa-onnx libraries
+        run: node scripts/fetch-sherpa-onnx.mjs "${{ matrix.target }}"
+
       - name: Lint Rust
         working-directory: src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings

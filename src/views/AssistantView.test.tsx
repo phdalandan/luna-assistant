@@ -2,7 +2,7 @@ import { clearMocks } from "@tauri-apps/api/mocks";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import type { Interaction } from "../lib/api";
-import { mockBackend, model } from "../test/backend";
+import { mockBackend, model, status } from "../test/backend";
 import { AssistantView } from "./AssistantView";
 
 const active = () => [model({ installed: true, active: true })];
@@ -107,5 +107,40 @@ describe("AssistantView", () => {
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Unable to load this model.",
     );
+  });
+
+  it("turns listening on and off from the microphone control", async () => {
+    const calls = mockBackend({
+      list_models: active,
+      get_status: () => ({
+        ...status,
+        voice: { state: "listening", problem: null },
+      }),
+    });
+    render(<AssistantView />);
+    const control = await screen.findByRole("button", { name: "Listening" });
+    expect(control.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(control);
+    expect(calls.find((call) => call.cmd === "set_listening")?.args).toEqual({
+      enabled: false,
+    });
+  });
+
+  it("explains why listening stopped", async () => {
+    mockBackend({
+      list_models: active,
+      get_status: () => ({
+        ...status,
+        voice: {
+          state: "off",
+          problem: "The microphone was disconnected.",
+        },
+      }),
+    });
+    render(<AssistantView />);
+    expect(
+      await screen.findByText("The microphone was disconnected."),
+    ).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Microphone off" })).toBeTruthy();
   });
 });

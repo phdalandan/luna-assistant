@@ -1,6 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectionStatus } from "../bindings/ConnectionStatus";
 import { ModelList } from "../components/ModelList";
+import { VoiceModels } from "../components/VoiceModels";
 import {
   api,
   errorMessage,
@@ -151,6 +152,11 @@ export function SettingsView() {
             ))}
           </select>
         </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Voice</legend>
+        <VoiceModels />
       </fieldset>
 
       <fieldset>

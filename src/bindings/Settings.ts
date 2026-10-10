@@ -8,4 +8,8 @@ homeAssistantUrl: string,
 /**
  * Changed only by selecting an installed model, never by saving the form.
  */
-activeModel: string | null, contextLength: number, };
+activeModel: string | null, contextLength: number, 
+/**
+ * Changed only from the listening control, never by saving the form.
+ */
+listening: boolean, };

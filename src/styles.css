@@ -123,8 +123,16 @@ h1 {
   padding: 2px var(--space-3);
   border: 1px solid var(--border);
   border-radius: 999px;
+  background: none;
   color: var(--muted);
+  font: inherit;
   font-size: 12px;
+  cursor: pointer;
+}
+
+.chip[aria-pressed="true"] {
+  border-color: var(--accent);
+  color: var(--accent);
 }
 
 .presence {

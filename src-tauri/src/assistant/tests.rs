@@ -244,11 +244,36 @@ async fn simple_commands_skip_the_model_and_report_verified_state() {
     let conversation = Conversation::new();
     let model = ScriptedModel::unused();
     let reply = conversation.ask(&model, "Turn on the porch light.").await;
-    assert_eq!(reply.text, "Front Porch is on.");
+    assert_eq!(reply.text, "Done.");
     assert!(reply.results.is_empty());
     assert_eq!(reply.metrics.route, Route::Direct);
     assert_eq!(model.passes(), 0);
     assert_eq!(conversation.state("light.front_porch"), "on");
+}
+
+#[tokio::test]
+async fn a_short_conversation_reads_naturally_and_varies() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::unused();
+    let mut replies = Vec::new();
+    for request in [
+        "Luna, turn on the porch light.",
+        "Make it 50%.",
+        "Actually, make it 20%.",
+        "Thanks.",
+    ] {
+        replies.push(conversation.ask(&model, request).await.text);
+    }
+    assert_eq!(
+        replies,
+        [
+            "Done.",
+            "You got it, 50%.",
+            "Dimmed to 20%.",
+            "You're welcome."
+        ]
+    );
+    assert_eq!(model.passes(), 0);
 }
 
 #[tokio::test]
@@ -257,7 +282,7 @@ async fn state_queries_and_time_come_from_home_assistant() {
     let model = ScriptedModel::unused();
     assert_eq!(
         conversation.ask(&model, "Is the garage open?").await.text,
-        "Garage door is closed."
+        "Nope, it's closed."
     );
     assert_eq!(
         conversation.ask(&model, "What time is it?").await.text,
@@ -272,7 +297,7 @@ async fn follow_up_pronouns_refer_to_the_previous_device() {
     let model = ScriptedModel::unused();
     conversation.ask(&model, "Turn on the porch light.").await;
     let reply = conversation.ask(&model, "Turn it off").await;
-    assert_eq!(reply.text, "Front Porch is off.");
+    assert_eq!(reply.text, "You got it.");
     assert_eq!(conversation.state("light.front_porch"), "off");
 }
 
@@ -282,7 +307,7 @@ async fn revert_restores_the_recorded_previous_state() {
     let model = ScriptedModel::unused();
     conversation.ask(&model, "Turn on the porch light.").await;
     let reply = conversation.ask(&model, "oh wait. revert that").await;
-    assert_eq!(reply.text, "Restored the previous state.");
+    assert_eq!(reply.text, "Reverted.");
     assert_eq!(conversation.state("light.front_porch"), "off");
     assert_eq!(model.passes(), 0);
 }
@@ -312,14 +337,14 @@ async fn repeated_commands_keep_the_original_state_for_revert() {
             .ask(&model, "Turn on the porch light")
             .await
             .text,
-        "Front Porch is on."
+        "Done."
     );
     assert_eq!(
         conversation
             .ask(&model, "Turn on the porch light")
             .await
             .text,
-        "Front Porch is on."
+        "You got it."
     );
     conversation.ask(&model, "Revert that").await;
     assert_eq!(conversation.state("light.front_porch"), "off");
@@ -363,12 +388,12 @@ async fn remembered_states_are_never_treated_as_current() {
             .ask(&model, "Is the porch light on?")
             .await
             .text,
-        "Front Porch is off."
+        "Nope, it's off."
     );
     conversation.set("light.front_porch", "on", json!({}));
     assert_eq!(
         conversation.ask(&model, "Is it on?").await.text,
-        "Front Porch is on."
+        "Yep, it's on."
     );
 }
 
@@ -411,19 +436,19 @@ async fn brightness_and_temperature_follow_ups_skip_the_model() {
     conversation.ask(&model, "Turn on the porch light").await;
     assert_eq!(
         conversation.ask(&model, "brightness 50%").await.text,
-        "Front Porch is at 50%."
+        "You got it, 50%."
     );
     assert_eq!(
         conversation
             .ask(&model, "Can you set the brightness to 10%")
             .await
             .text,
-        "Front Porch is at 10%."
+        "Dimmed to 10%."
     );
     conversation.ask(&model, "Is the thermostat on?").await;
     assert_eq!(
         conversation.ask(&model, "set it to 22").await.text,
-        "Thermostat is set to 22°."
+        "Set to 22°."
     );
     assert_eq!(model.passes(), 0);
 }
@@ -454,7 +479,8 @@ async fn several_matches_ask_which_one_and_a_single_match_acts() {
     assert_eq!(reply.text, "Which one: Back Porch or Front Porch?");
     assert_eq!(conversation.state("light.front_porch"), "off");
     let reply = conversation.ask(&model, "Is the AC on?").await;
-    assert_eq!(reply.text, "Thermostat is set to heat.");
+    assert_eq!(reply.text, "Yes, it's set to heat.");
+    assert_eq!(conversation.memory().referenced[0].id, "climate.thermostat");
 }
 
 #[tokio::test]
@@ -1152,7 +1178,8 @@ async fn a_device_word_prefers_devices_of_that_kind() {
     let reply = conversation
         .ask(&ScriptedModel::unused(), "Is the AC on?")
         .await;
-    assert_eq!(reply.text, "Thermostat is set to heat.");
+    assert_eq!(reply.text, "Yes, it's set to heat.");
+    assert_eq!(conversation.memory().referenced[0].id, "climate.thermostat");
 }
 
 #[tokio::test]

@@ -1,2 +1,45 @@
 [env]
 TS_RS_EXPORT_DIR = { value = "../src/bindings", relative = true }
+# whisper.cpp: portable code for AVX2 processors, like the bundled llama-server. Ignored on ARM.
+GGML_NATIVE = "OFF"
+GGML_AVX = "ON"
+GGML_AVX2 = "ON"
+GGML_FMA = "ON"
+GGML_F16C = "ON"
+# The cmake crate drops optimisation from release flags with the Visual Studio generator.
+# Both options are valid for MSVC and clang.
+CMAKE_C_FLAGS_RELEASE = "-O2 -DNDEBUG"
+CMAKE_CXX_FLAGS_RELEASE = "-O2 -DNDEBUG"
+
+# sherpa-onnx without its own speech synthesis (which links GPL-licensed espeak-ng), from the
+# pinned, checksum-verified archives `npm run runtime` extracts. Replaces sherpa-onnx-sys's
+# build script, which would download unverified archives that include it.
+[target.x86_64-pc-windows-msvc.sherpa-onnx]
+rustc-link-lib = [
+  "static:-bundle=sherpa-onnx-c-api",
+  "static:-bundle=sherpa-onnx-core",
+  "static:-bundle=kaldi-decoder-core",
+  "static:-bundle=sherpa-onnx-kaldifst-core",
+  "static:-bundle=sherpa-onnx-fstfar",
+  "static:-bundle=sherpa-onnx-fst",
+  "static:-bundle=kaldi-native-fbank-core",
+  "static:-bundle=kissfft-float",
+  "static:-bundle=onnxruntime",
+  "static:-bundle=ssentencepiece_core",
+]
+
+[target.aarch64-apple-darwin.sherpa-onnx]
+rustc-link-lib = [
+  "static:-bundle=sherpa-onnx-c-api",
+  "static:-bundle=sherpa-onnx-core",
+  "static:-bundle=kaldi-decoder-core",
+  "static:-bundle=sherpa-onnx-kaldifst-core",
+  "static:-bundle=sherpa-onnx-fstfar",
+  "static:-bundle=sherpa-onnx-fst",
+  "static:-bundle=kaldi-native-fbank-core",
+  "static:-bundle=kissfft-float",
+  "static:-bundle=onnxruntime",
+  "static:-bundle=ssentencepiece_core",
+  "dylib=c++",
+  "framework=Foundation",
+]

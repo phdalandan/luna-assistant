@@ -238,8 +238,16 @@ impl ExecutionReport {
     }
 
     fn done_line(&self, names: &[&str]) -> String {
+        match self.done_state() {
+            Some(state) => format!("{} {state}.", subject(names)),
+            None => format!("Started {}.", list(names)),
+        }
+    }
+
+    /// The state every entity is in once the action is done, or `None` for scenes and scripts.
+    pub fn done_state(&self) -> Option<String> {
         let state = match (self.action, self.value) {
-            (Action::Activate, _) => return format!("Started {}.", list(names)),
+            (Action::Activate, _) => return None,
             (Action::SetBrightness, Some(value)) if value > 0.0 => {
                 format!("at {}%", value.round())
             }
@@ -252,7 +260,7 @@ impl ExecutionReport {
             (Action::Unlock, _) => "unlocked".into(),
             (Action::SetTemperature, None) => "changed".into(),
         };
-        format!("{} {state}.", subject(names))
+        Some(state)
     }
 }
 

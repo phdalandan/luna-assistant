@@ -12,8 +12,10 @@ use crate::history::{self, Interaction};
 use crate::home_assistant::discovery::{self, DiscoveredInstance};
 use crate::home_assistant::{ConnectionStatus, HomeAssistant};
 use crate::inference::{Engine, EngineStatus, ModelSpec, Warmup};
-use crate::models::{ModelInfo, ModelManager};
+use crate::listening::{self, VoiceStatus};
+use crate::models::{ModelInfo, ModelManager, VoiceModelsInfo};
 use crate::settings::{self, Settings};
+use crate::voice::Voice;
 
 const VISIBLE_HISTORY: usize = 30;
 
@@ -23,6 +25,8 @@ pub struct AppState {
     pub engine: Engine,
     pub models: Arc<ModelManager>,
     session: Session,
+    pub voice: Voice,
+    voice_status: Mutex<VoiceStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -31,6 +35,7 @@ pub struct AppState {
 pub struct Status {
     pub home_assistant: ConnectionStatus,
     pub engine: EngineStatus,
+    pub voice: VoiceStatus,
 }
 
 impl AppState {
@@ -41,14 +46,14 @@ impl AppState {
             engine,
             models,
             session: Session::default(),
+            voice: Voice::default(),
+            voice_status: Mutex::default(),
         }
     }
 
-    fn db(&self) -> MutexGuard<'_, Connection> {
+    pub fn db(&self) -> MutexGuard<'_, Connection> {
         // A panic while holding the lock cannot leave SQLite in a partial state.
-        self.db
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+        lock(&self.db)
     }
 
     pub fn settings(&self) -> Result<Settings, AppError> {
@@ -59,7 +64,80 @@ impl AppState {
         Status {
             home_assistant: self.home_assistant.status(),
             engine: self.engine.status(),
+            voice: lock(&self.voice_status).clone(),
         }
+    }
+
+    /// Returns whether the status changed.
+    pub fn set_voice_status(&self, status: VoiceStatus) -> bool {
+        let mut current = lock(&self.voice_status);
+        let changed = *current != status;
+        *current = status;
+        changed
+    }
+
+    pub fn pending_confirmation(&self) -> Option<i64> {
+        self.session.pending_confirmation()
+    }
+
+    pub fn cancel_request(&self) {
+        self.session.cancel();
+    }
+
+    /// Handles one request, typed or spoken, and records it in the conversation.
+    pub async fn ask(&self, app: &AppHandle, text: &str) -> Result<Interaction, AppError> {
+        end_conversation_when_idle(app);
+        let text = text.trim();
+        let settings = self.settings()?;
+        let spec = self.model_spec(&settings)?;
+        let history = history::recent(&self.db(), VISIBLE_HISTORY)?;
+        let cancel = self.session.begin()?;
+        let _finished = SessionGuard(&self.session);
+
+        let model = EngineChat {
+            engine: &self.engine,
+            spec: &spec,
+        };
+        let mut memory = self.session.memory();
+        let result =
+            assistant::respond(&model, self.home(), &history, &mut memory, text, &cancel).await;
+        self.session.remember(memory);
+        let reply = result?;
+        log::info!("request handled: {}", reply.metrics);
+        let interaction = history::insert(
+            &self.db(),
+            text,
+            &reply.text,
+            &reply.results,
+            !reply.confirmation.is_empty(),
+        )?;
+        if !reply.confirmation.is_empty() {
+            self.session
+                .await_confirmation(interaction.id, reply.confirmation);
+        }
+        end_conversation_when_idle(app);
+        Ok(interaction)
+    }
+
+    pub async fn confirm(
+        &self,
+        app: &AppHandle,
+        id: i64,
+        confirmed: bool,
+    ) -> Result<Interaction, AppError> {
+        end_conversation_when_idle(app);
+        let text = match (self.session.take_confirmation(id), confirmed) {
+            (Ok(requests), true) => {
+                let mut memory = self.session.memory();
+                let reply = assistant::confirm(self.home(), &mut memory, &requests).await;
+                self.session.remember(memory);
+                log::info!("confirmation handled: {}", reply.metrics);
+                reply.text
+            }
+            (Ok(_), false) => "Okay, nothing changed.".to_owned(),
+            (Err(_), _) => "That request expired, so nothing changed.".to_owned(),
+        };
+        history::resolve(&self.db(), id, &text, &[])
     }
 
     /// Connects to Home Assistant with the saved address and token.
@@ -116,6 +194,7 @@ pub fn save_settings(
     let previous = state.settings()?;
     let settings = Settings {
         active_model: previous.active_model.clone(),
+        listening: previous.listening,
         ..settings.validated()?
     };
     let token = token.and_then(AccessToken::new);
@@ -252,38 +331,7 @@ pub async fn ask(
     state: State<'_, AppState>,
     text: String,
 ) -> Result<Interaction, CommandError> {
-    end_conversation_when_idle(&app);
-    let text = text.trim().to_owned();
-    let settings = state.settings()?;
-    let spec = state.model_spec(&settings)?;
-    let history = history::recent(&state.db(), VISIBLE_HISTORY)?;
-    let cancel = state.session.begin()?;
-    let _finished = SessionGuard(&state.session);
-
-    let model = EngineChat {
-        engine: &state.engine,
-        spec: &spec,
-    };
-    let mut memory = state.session.memory();
-    let result =
-        assistant::respond(&model, state.home(), &history, &mut memory, &text, &cancel).await;
-    state.session.remember(memory);
-    let reply = result?;
-    log::info!("request handled: {}", reply.metrics);
-    let interaction = history::insert(
-        &state.db(),
-        &text,
-        &reply.text,
-        &reply.results,
-        !reply.confirmation.is_empty(),
-    )?;
-    if !reply.confirmation.is_empty() {
-        state
-            .session
-            .await_confirmation(interaction.id, reply.confirmation);
-    }
-    end_conversation_when_idle(&app);
-    Ok(interaction)
+    Ok(state.ask(&app, &text).await?)
 }
 
 /// Clears the conversation once no request follows within `CONVERSATION_LIFETIME`.
@@ -306,7 +354,7 @@ fn end_conversation_when_idle(app: &AppHandle) {
 
 #[tauri::command]
 pub fn cancel_request(state: State<'_, AppState>) {
-    state.session.cancel();
+    state.cancel_request();
 }
 
 #[tauri::command]
@@ -316,19 +364,7 @@ pub async fn confirm_action(
     id: i64,
     confirmed: bool,
 ) -> Result<Interaction, CommandError> {
-    end_conversation_when_idle(&app);
-    let text = match (state.session.take_confirmation(id), confirmed) {
-        (Ok(requests), true) => {
-            let mut memory = state.session.memory();
-            let reply = assistant::confirm(state.home(), &mut memory, &requests).await;
-            state.session.remember(memory);
-            log::info!("confirmation handled: {}", reply.metrics);
-            reply.text
-        }
-        (Ok(_), false) => "Okay, nothing changed.".to_owned(),
-        (Err(_), _) => "That request expired, so nothing changed.".to_owned(),
-    };
-    Ok(history::resolve(&state.db(), id, &text, &[])?)
+    Ok(state.confirm(&app, id, confirmed).await?)
 }
 
 #[tauri::command]
@@ -364,6 +400,26 @@ pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<bool, Comman
         .map_err(|error| AppError::LaunchAtLogin(error.to_string()).into())
 }
 
+#[tauri::command]
+pub fn set_listening(app: AppHandle, enabled: bool) -> Result<(), CommandError> {
+    Ok(listening::set_enabled(&app, enabled)?)
+}
+
+#[tauri::command]
+pub fn get_voice_models(state: State<'_, AppState>) -> VoiceModelsInfo {
+    state.models.voice().info()
+}
+
+#[tauri::command]
+pub fn download_voice_models(state: State<'_, AppState>) {
+    state.models.voice().start_download();
+}
+
+#[tauri::command]
+pub fn cancel_voice_download(state: State<'_, AppState>) {
+    state.models.voice().cancel_download();
+}
+
 /// Marks the request finished even if the command future is dropped.
 struct SessionGuard<'a>(&'a Session);
 
@@ -371,4 +427,10 @@ impl Drop for SessionGuard<'_> {
     fn drop(&mut self) {
         self.0.finish();
     }
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }

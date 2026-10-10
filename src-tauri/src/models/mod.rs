@@ -2,7 +2,9 @@
 pub mod catalog;
 mod download;
 mod memory;
+pub mod speech;
 mod store;
+mod voice;
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -14,6 +16,7 @@ use tokio_util::sync::CancellationToken;
 pub use catalog::{CatalogModel, ChatOptions};
 use download::DownloadError;
 pub use store::ModelStore;
+pub use voice::{VoiceModels, VoiceModelsInfo};
 
 const PROGRESS_INTERVAL: Duration = Duration::from_millis(250);
 /// Downloads fail instead of hanging when the connection stalls this long.
@@ -99,6 +102,7 @@ pub struct ModelManager {
     http: reqwest::Client,
     activity: Mutex<HashMap<String, Activity>>,
     events: Arc<dyn ModelEvents>,
+    voice: Arc<VoiceModels>,
 }
 
 impl ModelManager {
@@ -112,13 +116,25 @@ impl ModelManager {
             .read_timeout(READ_TIMEOUT)
             .build()
             .map_err(|error| ModelError::Io(error.to_string()))?;
+        let speech_store = ModelStore::open(store.dir().join("speech")).map_err(io_error)?;
+        let voice = Arc::new(VoiceModels::new(
+            catalog::speech(),
+            speech_store,
+            http.clone(),
+            events.clone(),
+        ));
         Ok(Self {
             models,
             store,
             http,
             activity: Mutex::default(),
             events,
+            voice,
         })
+    }
+
+    pub fn voice(&self) -> &Arc<VoiceModels> {
+        &self.voice
     }
 
     pub fn store(&self) -> &ModelStore {

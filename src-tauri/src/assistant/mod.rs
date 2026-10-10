@@ -3,6 +3,8 @@
 mod clock;
 mod context;
 mod direct;
+mod phrasing;
+mod relevance;
 mod route;
 mod session;
 mod tools;
@@ -21,6 +23,7 @@ use crate::inference::{
     ChatMessage, Completion, Engine, FunctionCall, InferenceError, ModelSpec, Role, Timings,
     ToolCall, Warmup,
 };
+pub use relevance::{Relevance, classify as relevance};
 pub use session::{CONVERSATION_LIFETIME, Memory, Session};
 use session::{MAX_REFERENCED, Turn};
 use tools::ToolRequest;
@@ -215,7 +218,8 @@ pub async fn confirm<A: HomeApi>(
     let mut turn = Turn::default();
     let reports = direct::execute_all(&home, &plans, &mut turn, &mut reply.metrics).await;
     memory.record(turn);
-    reply.text = direct::summary(&reports);
+    // Security-sensitive results always name the device.
+    reply.text = phrasing::acknowledge(&reports, false, memory.next_variant());
     reply
 }
 
@@ -301,7 +305,9 @@ async fn ask_model<A: HomeApi>(
                 }
                 ToolOutcome::Executed(report) => {
                     reply.metrics.record(&report);
-                    reply.results.extend(report.summary());
+                    reply
+                        .results
+                        .extend(phrasing::result_lines(&report, memory.next_variant()));
                     report.for_model()
                 }
                 ToolOutcome::NeedsConfirmation { prompt, request } => {

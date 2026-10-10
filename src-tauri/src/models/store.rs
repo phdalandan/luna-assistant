@@ -2,7 +2,16 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+#[cfg(test)]
 use super::catalog::CatalogModel;
+
+/// A file downloaded into a store and verified against its catalogue checksum.
+pub trait Artifact {
+    fn url(&self) -> &str;
+    fn file_name(&self) -> &str;
+    fn size(&self) -> u64;
+    fn sha256(&self) -> &str;
+}
 
 const PARTIAL_DIR: &str = "downloads";
 const MANIFEST_EXTENSION: &str = "verified";
@@ -23,49 +32,49 @@ impl ModelStore {
         &self.dir
     }
 
-    pub fn model_path(&self, model: &CatalogModel) -> PathBuf {
-        self.dir.join(&model.file_name)
+    pub fn model_path(&self, model: &impl Artifact) -> PathBuf {
+        self.dir.join(model.file_name())
     }
 
-    pub fn partial_path(&self, model: &CatalogModel) -> PathBuf {
+    pub fn partial_path(&self, model: &impl Artifact) -> PathBuf {
         self.dir
             .join(PARTIAL_DIR)
-            .join(format!("{}.part", model.file_name))
+            .join(format!("{}.part", model.file_name()))
     }
 
-    fn manifest_path(&self, model: &CatalogModel) -> PathBuf {
+    fn manifest_path(&self, model: &impl Artifact) -> PathBuf {
         self.dir
-            .join(format!("{}.{MANIFEST_EXTENSION}", model.file_name))
+            .join(format!("{}.{MANIFEST_EXTENSION}", model.file_name()))
     }
 
     /// Bytes already downloaded for a paused or interrupted download.
-    pub fn partial_len(&self, model: &CatalogModel) -> u64 {
+    pub fn partial_len(&self, model: &impl Artifact) -> u64 {
         fs::metadata(self.partial_path(model)).map_or(0, |metadata| metadata.len())
     }
 
     /// Installed means verified against the catalogue checksum and still the expected size.
-    pub fn is_installed(&self, model: &CatalogModel) -> bool {
+    pub fn is_installed(&self, model: &impl Artifact) -> bool {
         let verified = fs::read_to_string(self.manifest_path(model))
-            .is_ok_and(|checksum| checksum.trim() == model.sha256);
-        let complete =
-            fs::metadata(self.model_path(model)).is_ok_and(|metadata| metadata.len() == model.size);
+            .is_ok_and(|checksum| checksum.trim() == model.sha256());
+        let complete = fs::metadata(self.model_path(model))
+            .is_ok_and(|metadata| metadata.len() == model.size());
         verified && complete
     }
 
     /// Moves a verified download into place, then records it as installed.
-    pub fn install(&self, model: &CatalogModel, verified_file: &Path) -> io::Result<()> {
+    pub fn install(&self, model: &impl Artifact, verified_file: &Path) -> io::Result<()> {
         fs::rename(verified_file, self.model_path(model))?;
-        fs::write(self.manifest_path(model), &model.sha256)
+        fs::write(self.manifest_path(model), model.sha256())
     }
 
-    pub fn delete(&self, model: &CatalogModel) -> io::Result<()> {
+    pub fn delete(&self, model: &impl Artifact) -> io::Result<()> {
         // The manifest goes first so a half-deleted model is never reported as installed.
         remove_if_exists(&self.manifest_path(model))?;
         remove_if_exists(&self.model_path(model))?;
         self.discard_partial(model)
     }
 
-    pub fn discard_partial(&self, model: &CatalogModel) -> io::Result<()> {
+    pub fn discard_partial(&self, model: &impl Artifact) -> io::Result<()> {
         remove_if_exists(&self.partial_path(model))
     }
 }

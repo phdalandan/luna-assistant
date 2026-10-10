@@ -1,13 +1,14 @@
 use tauri::image::Image;
-use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::{App, AppHandle, Manager, Window, WindowEvent};
+use tauri::{App, AppHandle, Manager, Window, WindowEvent, Wry};
 
 /// Passed by the login item so Luna starts in the tray without opening its window.
 pub const START_HIDDEN_ARG: &str = "--hidden";
 
 const MAIN_WINDOW: &str = "main";
 const MENU_OPEN: &str = "open";
+const MENU_LISTENING: &str = "listening";
 const MENU_QUIT: &str = "quit";
 
 pub fn starts_hidden<I: IntoIterator<Item = String>>(args: I) -> bool {
@@ -38,11 +39,17 @@ pub fn handle_window_event(window: &Window, event: &WindowEvent) {
     }
 }
 
+/// The tray's listening item, kept so it can follow changes made in the window.
+struct ListeningItem(CheckMenuItem<Wry>);
+
 pub fn setup_tray(app: &App) -> tauri::Result<()> {
     let open = MenuItem::with_id(app, MENU_OPEN, "Open Luna", true, None::<&str>)?;
+    let listening =
+        CheckMenuItem::with_id(app, MENU_LISTENING, "Listening", true, false, None::<&str>)?;
     let quit = MenuItem::with_id(app, MENU_QUIT, "Quit Luna", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
-    let menu = Menu::with_items(app, &[&open, &separator, &quit])?;
+    let menu = Menu::with_items(app, &[&open, &listening, &separator, &quit])?;
+    app.manage(ListeningItem(listening));
 
     TrayIconBuilder::with_id("luna")
         .icon(tray_icon()?)
@@ -52,6 +59,12 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
         .show_menu_on_left_click(cfg!(target_os = "macos"))
         .on_menu_event(|app, event| match event.id().as_ref() {
             MENU_OPEN => show_main_window(app),
+            MENU_LISTENING => {
+                let enabled = app.state::<ListeningItem>().0.is_checked().unwrap_or(false);
+                if crate::listening::set_enabled(app, enabled).is_err() {
+                    show_main_window(app);
+                }
+            }
             MENU_QUIT => app.exit(0),
             _ => {}
         })
@@ -67,6 +80,15 @@ pub fn setup_tray(app: &App) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Keeps the tray's listening check mark in step with the actual state.
+pub fn show_listening(app: &AppHandle, on: bool) {
+    if let Some(item) = app.try_state::<ListeningItem>()
+        && let Err(error) = item.0.set_checked(on)
+    {
+        log::error!("failed to update the tray menu: {error}");
+    }
 }
 
 fn tray_icon() -> tauri::Result<Image<'static>> {

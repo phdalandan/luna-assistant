@@ -6,6 +6,7 @@ import {
   events,
   type Interaction,
   type Status,
+  type VoiceState,
 } from "../lib/api";
 import { formatTime } from "../lib/format";
 import { useEvent, useModels, useStatus } from "../lib/hooks";
@@ -28,6 +29,14 @@ export function AssistantView() {
   }, []);
 
   useEvent(() => events.onConversationCleared(() => setInteractions([])));
+  useEvent(() =>
+    events.onInteractionsChanged(() => {
+      api
+        .listInteractions()
+        .then(setInteractions)
+        .catch((err: unknown) => setError(errorMessage(err)));
+    }),
+  );
 
   useEffect(() => {
     end.current?.scrollIntoView?.({ block: "end" });
@@ -49,6 +58,22 @@ export function AssistantView() {
   if (!models) {
     return null;
   }
+  const voice = status?.voice.state ?? "off";
+  const header = (
+    <Header
+      voice={voice}
+      toggle={() =>
+        api
+          .setListening(voice === "off")
+          .catch((err: unknown) => setError(errorMessage(err)))
+      }
+    />
+  );
+  const problem = status?.voice.problem && (
+    <p className="detail" role="status">
+      {status.voice.problem}
+    </p>
+  );
   const activeModel = models.find((model) => model.active);
   if (!activeModel) {
     const installed = models.filter((model) => model.installed);
@@ -58,7 +83,8 @@ export function AssistantView() {
         : models.filter((model) => model.recommended);
     return (
       <section className="assistant">
-        <Header />
+        {header}
+        {problem}
         <div className="onboarding">
           <p className="status">
             {installed.length > 0
@@ -112,13 +138,19 @@ export function AssistantView() {
   }
 
   const empty = interactions.length === 0 && !pending && !error;
+  const busy = voice === "processing" || voice === "responding";
 
   return (
     <section className="assistant">
-      <Header />
+      {header}
+      {problem}
       {empty ? (
         <div className="presence">
-          <div className="orb" data-state="idle" aria-hidden="true" />
+          <div
+            className="orb"
+            data-state={busy ? "thinking" : "idle"}
+            aria-hidden="true"
+          />
           <StatusLine status={status} />
         </div>
       ) : (
@@ -175,11 +207,26 @@ export function AssistantView() {
   );
 }
 
-function Header() {
+const VOICE_LABELS: Record<VoiceState, string> = {
+  off: "Microphone off",
+  listening: "Listening",
+  processing: "Processing",
+  responding: "Responding",
+};
+
+function Header({ voice, toggle }: { voice: VoiceState; toggle: () => void }) {
   return (
     <header className="assistant-header">
       <h1>Luna</h1>
-      <span className="chip">Microphone off</span>
+      <button
+        className="chip"
+        type="button"
+        data-state={voice}
+        aria-pressed={voice !== "off"}
+        onClick={toggle}
+      >
+        {VOICE_LABELS[voice]}
+      </button>
     </header>
   );
 }

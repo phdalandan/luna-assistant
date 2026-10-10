@@ -6,6 +6,7 @@ use crate::home_assistant::discovery::DiscoveryError;
 use crate::inference::InferenceError;
 use crate::models::ModelError;
 use crate::settings::SettingsError;
+use crate::voice::VoiceError;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AppError {
@@ -31,6 +32,10 @@ pub enum AppError {
     Assistant(#[from] AssistantError),
     #[error("no AI model is selected")]
     NoActiveModel,
+    #[error("voice models are not installed")]
+    VoiceModelsMissing,
+    #[error("listening could not start: {0}")]
+    Voice(VoiceError),
 }
 
 impl AppError {
@@ -53,6 +58,8 @@ impl AppError {
             Self::Inference(error) => inference_message(error),
             Self::Assistant(error) => assistant_message(error),
             Self::NoActiveModel => "Choose an AI model in Settings to get started.",
+            Self::VoiceModelsMissing => "Download the voice models in Settings first.",
+            Self::Voice(error) => return crate::listening::problem(error),
         }
         .to_owned()
     }

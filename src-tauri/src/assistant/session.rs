@@ -24,6 +24,8 @@ pub struct Memory {
     pub last_request: Option<Pending>,
     /// The request waiting on "Which one?", with the choices in the order they were offered.
     pub choice: Option<Choice>,
+    /// Rotates reply wording so the same acknowledgement is not repeated every time.
+    pub variant: usize,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -65,6 +67,12 @@ impl Turn {
 }
 
 impl Memory {
+    pub fn next_variant(&mut self) -> usize {
+        let variant = self.variant;
+        self.variant = self.variant.wrapping_add(1);
+        variant
+    }
+
     pub fn record(&mut self, turn: Turn) {
         if !turn.referenced.is_empty() {
             self.referenced = turn.referenced;
@@ -135,6 +143,14 @@ impl Session {
             }
             _ => Err(AssistantError::ConfirmationExpired),
         }
+    }
+
+    /// The interaction waiting for "yes" or "no", if it has not expired.
+    pub fn pending_confirmation(&self) -> Option<i64> {
+        lock(&self.pending)
+            .as_ref()
+            .filter(|confirmation| confirmation.created.elapsed() < CONFIRMATION_TIMEOUT)
+            .map(|confirmation| confirmation.interaction_id)
     }
 
     /// The conversation memory, or an empty one if the conversation went quiet.

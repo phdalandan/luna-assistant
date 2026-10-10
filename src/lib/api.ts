@@ -6,8 +6,20 @@ import type { Interaction } from "../bindings/Interaction";
 import type { ModelInfo } from "../bindings/ModelInfo";
 import type { Settings } from "../bindings/Settings";
 import type { Status } from "../bindings/Status";
+import type { VoiceModelsInfo } from "../bindings/VoiceModelsInfo";
+import type { VoiceState } from "../bindings/VoiceState";
+import type { VoiceStatus } from "../bindings/VoiceStatus";
 
-export type { DiscoveredInstance, Interaction, ModelInfo, Settings, Status };
+export type {
+  DiscoveredInstance,
+  Interaction,
+  ModelInfo,
+  Settings,
+  Status,
+  VoiceModelsInfo,
+  VoiceState,
+  VoiceStatus,
+};
 
 export interface DownloadProgress {
   id: string;
@@ -38,6 +50,11 @@ export const api = {
   getLaunchAtLogin: () => invoke<boolean>("get_launch_at_login"),
   setLaunchAtLogin: (enabled: boolean) =>
     invoke<boolean>("set_launch_at_login", { enabled }),
+  setListening: (enabled: boolean) =>
+    invoke<null>("set_listening", { enabled }),
+  getVoiceModels: () => invoke<VoiceModelsInfo>("get_voice_models"),
+  downloadVoiceModels: () => invoke<null>("download_voice_models"),
+  cancelVoiceDownload: () => invoke<null>("cancel_voice_download"),
 };
 
 export const events = {
@@ -45,6 +62,8 @@ export const events = {
     listen<Status>("status-changed", (event) => handler(event.payload)),
   onConversationCleared: (handler: () => void) =>
     listen("conversation-cleared", () => handler()),
+  onInteractionsChanged: (handler: () => void) =>
+    listen("interactions-changed", () => handler()),
   onModelsChanged: (handler: () => void) =>
     listen("models-changed", () => handler()),
   onDownloadProgress: (handler: (progress: DownloadProgress) => void) =>

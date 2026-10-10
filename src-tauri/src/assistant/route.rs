@@ -48,9 +48,10 @@ pub enum Subject {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Asked {
-    Power,
-    Opening,
-    Locking,
+    /// "Is the porch light on?" asks whether it is on (`true`) or off (`false`).
+    Power(bool),
+    Opening(bool),
+    Locking(bool),
     /// "Check the porch light", "garage status": any readable state.
     Status,
     /// "How warm is the bedroom?"
@@ -72,11 +73,11 @@ const SOFT: &[&str] = &[
     "back", "again", "just", "also", "too", "instead", "actually",
 ];
 const ARTICLES: &[&str] = &["the", "my", "our", "still", "in", "at", "of"];
-const PRONOUNS: &[&str] = &["it", "that", "them", "those", "these", "this"];
+pub(super) const PRONOUNS: &[&str] = &["it", "that", "them", "those", "these", "this"];
 const SETTING_VERBS: &[&str] = &["set", "dim", "change", "turn", "put", "make"];
 const SETTING_WORDS: &[&str] = &["brightness", "temperature"];
 /// Requests about several places or exceptions need the model's interpretation.
-const BROAD: &[&str] = &[
+pub(super) const BROAD: &[&str] = &[
     "all",
     "every",
     "everything",
@@ -157,7 +158,7 @@ const STATEMENT_STARTS: &[&str] = &[
 const STATE_WORDS: &[&str] = &[
     "on", "off", "open", "closed", "locked", "unlocked", "wrong", "right", "true",
 ];
-const ACTION_VERBS: &[&str] = &[
+pub(super) const ACTION_VERBS: &[&str] = &[
     "turn", "switch", "set", "open", "close", "shut", "lock", "unlock", "dim", "make", "put",
     "change", "start", "stop", "activate",
 ];
@@ -347,9 +348,12 @@ fn parse_sentence(sentence: &str) -> Option<Intent> {
         }
         ["is" | "are", rest @ .., last] => {
             let asked = match *last {
-                "on" | "off" | "running" => Asked::Power,
-                "open" | "closed" => Asked::Opening,
-                "locked" | "unlocked" => Asked::Locking,
+                "on" | "running" => Asked::Power(true),
+                "off" => Asked::Power(false),
+                "open" => Asked::Opening(true),
+                "closed" => Asked::Opening(false),
+                "locked" => Asked::Locking(true),
+                "unlocked" => Asked::Locking(false),
                 _ => return None,
             };
             Some(Intent::Query {
@@ -519,9 +523,9 @@ pub fn domains(intent: &Intent) -> Vec<&'static str> {
             .filter(|domain| actions::supports_domain(*action, domain))
             .collect(),
         Intent::Query { asked, .. } => match asked {
-            Asked::Power => POWER_DOMAINS.to_vec(),
-            Asked::Opening => OPENING_DOMAINS.to_vec(),
-            Asked::Locking => vec!["lock"],
+            Asked::Power(_) => POWER_DOMAINS.to_vec(),
+            Asked::Opening(_) => OPENING_DOMAINS.to_vec(),
+            Asked::Locking(_) => vec!["lock"],
             Asked::Status => STATUS_DOMAINS.to_vec(),
             Asked::Temperature => TEMPERATURE_DOMAINS.to_vec(),
         },
@@ -657,7 +661,7 @@ fn covers(home: &Home, entity: &Entity, phrase: &[String]) -> bool {
     named || phrase.iter().all(|word| device_word(word))
 }
 
-fn names_anything(home: &Home, word: &str) -> bool {
+pub(super) fn names_anything(home: &Home, word: &str) -> bool {
     home.entities
         .values()
         .any(|entity| !entity.internal && name_words(entity).contains(word))
@@ -721,7 +725,7 @@ fn is_kind_of(word: &str, entity: &Entity) -> bool {
         }
 }
 
-fn device_word(word: &str) -> bool {
+pub(super) fn device_word(word: &str) -> bool {
     DEVICE_WORDS.iter().any(|(kind, _)| *kind == word)
 }
 
@@ -729,7 +733,7 @@ fn words(text: &str) -> HashSet<String> {
     tokens(text).iter().map(|word| stem(word)).collect()
 }
 
-fn stem(word: &str) -> String {
+pub(super) fn stem(word: &str) -> String {
     word.strip_suffix('s')
         .filter(|stem| stem.len() >= 3 && !stem.ends_with('s'))
         .unwrap_or(word)
@@ -737,7 +741,7 @@ fn stem(word: &str) -> String {
 }
 
 /// Lowercase words without punctuation or polite filler at either end.
-fn tokens(text: &str) -> Vec<String> {
+pub(super) fn tokens(text: &str) -> Vec<String> {
     let chars: Vec<char> = text
         .to_lowercase()
         .replace(['\u{2019}', '\u{2018}'], "'")
@@ -834,7 +838,7 @@ mod tests {
         assert_eq!(
             parse("Is the garage open?"),
             Some(Intent::Query {
-                asked: Asked::Opening,
+                asked: Asked::Opening(true),
                 subject: named(&["garage"])
             })
         );

@@ -6,6 +6,8 @@ mod validate;
 
 use serde::Deserialize;
 
+#[cfg(test)]
+pub use execute::{EntityOutcome, Outcome};
 pub use execute::{ExecutionReport, capitalize, execute, list, subject, verb};
 pub use resolve::select;
 pub use restore::restore;

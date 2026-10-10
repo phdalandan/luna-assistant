@@ -1,7 +1,7 @@
 //! Handles recognised requests without the language model, and shared execution helpers.
-use super::route::{self, Intent, Resolution, Subject};
+use super::route::{self, Asked, Intent, Resolution, Subject};
 use super::session::{Choice, Memory, Pending, Turn};
-use super::{Home, Metrics, Reply, clock};
+use super::{Home, Metrics, Reply, clock, phrasing};
 use crate::actions::{
     self, Action, ControlRequest, ExecutionReport, Plan, Target, ValidationError,
 };
@@ -23,7 +23,7 @@ pub async fn handle<A: HomeApi>(
             if !home.connected {
                 return Some(Reply::direct(NOT_CONNECTED));
             }
-            return perform(home, memory, choice.pending, ids).await;
+            return perform(home, memory, choice.pending, None, ids).await;
         }
     }
     let intent = route::parse(request)?;
@@ -31,8 +31,12 @@ pub async fn handle<A: HomeApi>(
         return Some(Reply::direct(NOT_CONNECTED));
     }
     let intent_domains = route::domains(&intent);
+    let asked = match &intent {
+        Intent::Query { asked, .. } => Some(*asked),
+        _ => None,
+    };
     let (subject, pending) = match intent {
-        Intent::Thanks => return Some(Reply::direct("You're welcome.")),
+        Intent::Thanks => return Some(Reply::direct(phrasing::thanks(memory.next_variant()))),
         Intent::Time => return Some(Reply::direct(clock::read(&home.cache.read()).reply())),
         Intent::FollowUp { subject } => (subject, previous?),
         Intent::Undo => return Some(undo(home, memory).await),
@@ -52,14 +56,16 @@ pub async fn handle<A: HomeApi>(
             Resolution::Unknown => return None,
         }
     };
-    perform(home, memory, pending, ids).await
+    perform(home, memory, pending, asked, ids).await
 }
 
-/// Carries out a recognised request on resolved entities.
+/// Carries out a recognised request on resolved entities. `asked` is set for direct questions,
+/// so "is the garage open?" can be answered yes or no.
 async fn perform<A: HomeApi>(
     home: &Home<'_, A>,
     memory: &mut Memory,
     pending: Pending,
+    asked: Option<Asked>,
     ids: Vec<String>,
 ) -> Option<Reply> {
     let (action, value) = match &pending {
@@ -67,10 +73,23 @@ async fn perform<A: HomeApi>(
             let snapshot = home.cache.read();
             let entities: Vec<&Entity> = ids.iter().filter_map(|id| snapshot.entity(id)).collect();
             let mut turn = Turn::default();
-            let text = if domains.as_slice() == route::TEMPERATURE_DOMAINS {
-                describe_temperatures(&entities, &mut turn)
-            } else {
-                describe(&entities, &mut turn)
+            let answer = match (asked, entities.as_slice()) {
+                (Some(asked), [entity]) => {
+                    let phrase = state_phrase(entity);
+                    let answer = phrasing::yes_or_no(entity, asked, &phrase, memory.next_variant());
+                    if answer.is_some() {
+                        turn.refer(&entity.id, phrase);
+                    }
+                    answer
+                }
+                _ => None,
+            };
+            let text = match answer {
+                Some(answer) => answer,
+                None if domains.as_slice() == route::TEMPERATURE_DOMAINS => {
+                    describe_temperatures(&entities, &mut turn)
+                }
+                None => describe(&entities, &mut turn),
             };
             memory.record(turn);
             memory.last_request = Some(pending.clone());
@@ -88,7 +107,7 @@ async fn perform<A: HomeApi>(
         },
         value,
     };
-    Some(run(home, memory, vec![request], None).await)
+    Some(run(home, memory, vec![request], None, true).await)
 }
 
 /// The domains a request applies to, so a follow-up resolves its new subject the same way.
@@ -185,12 +204,14 @@ fn setting_action(home: &HomeModel, ids: &[String]) -> Option<Action> {
 }
 
 /// Validates every request, asks for confirmation if any is sensitive, then executes.
-/// `done` replaces the result lines when every change is verified.
+/// `done` replaces the result lines when every change is verified. `named` means the user said
+/// which device, so a single one needs no name in the reply.
 pub async fn run<A: HomeApi>(
     home: &Home<'_, A>,
     memory: &mut Memory,
     requests: Vec<ControlRequest>,
     done: Option<&str>,
+    named: bool,
 ) -> Reply {
     let plans = match plan_all(home.cache, &requests) {
         Ok(plans) => plans,
@@ -209,9 +230,10 @@ pub async fn run<A: HomeApi>(
     let mut turn = Turn::default();
     let reports = execute_all(home, &plans, &mut turn, &mut reply.metrics).await;
     memory.record(turn);
+    let variant = memory.next_variant();
     reply.text = match done {
         Some(done) if reports.iter().all(ExecutionReport::all_done) => done.to_owned(),
-        _ => summary(&reports),
+        _ => phrasing::acknowledge(&reports, named, variant),
     };
     reply
 }
@@ -261,14 +283,6 @@ pub fn record_execution(report: &ExecutionReport, cache: &HomeCache, turn: &mut 
     }
 }
 
-pub fn summary(reports: &[ExecutionReport]) -> String {
-    reports
-        .iter()
-        .flat_map(ExecutionReport::summary)
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
 pub fn confirmation_prompt(plans: &[Plan]) -> String {
     plans
         .iter()
@@ -300,7 +314,8 @@ async fn undo<A: HomeApi>(home: &Home<'_, A>, memory: &mut Memory) -> Reply {
     if requests.is_empty() {
         return Reply::direct("It's already back to how it was.");
     }
-    run(home, memory, requests, Some("Restored the previous state.")).await
+    let done = phrasing::undone(memory.next_variant());
+    run(home, memory, requests, Some(done), true).await
 }
 
 async fn recheck<A: HomeApi>(home: &Home<'_, A>, memory: &mut Memory) -> Reply {

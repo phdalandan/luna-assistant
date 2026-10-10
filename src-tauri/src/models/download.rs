@@ -9,8 +9,9 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
+#[cfg(test)]
 use super::catalog::CatalogModel;
-use super::store::ModelStore;
+use super::store::{Artifact, ModelStore};
 
 /// Space kept free beyond the model itself so the disk is never filled completely.
 const DISK_MARGIN: u64 = 512 * 1024 * 1024;
@@ -48,7 +49,7 @@ pub fn check_space(needed: u64, available: u64) -> Result<(), DownloadError> {
 /// installed after its SHA-256 matches the catalogue. Stopping keeps the partial file.
 pub async fn download(
     http: &reqwest::Client,
-    model: &CatalogModel,
+    model: &impl Artifact,
     store: &ModelStore,
     stop: &CancellationToken,
     mut progress: impl FnMut(u64),
@@ -58,15 +59,15 @@ pub async fn download(
     }
     let partial = store.partial_path(model);
     let mut offset = store.partial_len(model);
-    if offset > model.size {
+    if offset > model.size() {
         store.discard_partial(model)?;
         offset = 0;
     }
-    check_space(model.size - offset, fs4::available_space(store.dir())?)?;
+    check_space(model.size() - offset, fs4::available_space(store.dir())?)?;
 
     let mut hasher = hash_prefix(&partial, offset).await?;
-    if offset < model.size {
-        let mut request = http.get(&model.url);
+    if offset < model.size() {
+        let mut request = http.get(model.url());
         if offset > 0 {
             request = request.header(RANGE, format!("bytes={offset}-"));
         }
@@ -115,7 +116,7 @@ pub async fn download(
                 }
             };
             offset += bytes.len() as u64;
-            if offset > model.size {
+            if offset > model.size() {
                 drop(file);
                 store.discard_partial(model)?;
                 return Err(DownloadError::Verification);
@@ -125,15 +126,15 @@ pub async fn download(
             progress(offset);
         }
         file.sync_all().await?;
-        if offset != model.size {
+        if offset != model.size() {
             return Err(DownloadError::Interrupted(format!(
                 "received {offset} of {} bytes",
-                model.size
+                model.size()
             )));
         }
     }
 
-    if hex(&hasher.finalize()) != model.sha256 {
+    if hex(&hasher.finalize()) != model.sha256() {
         store.discard_partial(model)?;
         return Err(DownloadError::Verification);
     }

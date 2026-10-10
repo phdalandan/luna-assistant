@@ -5,6 +5,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { afterEach, describe, expect, it } from "vitest";
 import { mockBackend } from "../test/backend";
@@ -104,6 +105,20 @@ describe("SettingsView", () => {
     ).toBeTruthy();
     expect((await screen.findByRole("alert")).textContent).toBe(
       "Luna couldn't access your saved access token. Try again.",
+    );
+  });
+
+  it("downloads the speech models only when asked", async () => {
+    const calls = mockBackend();
+    render(<SettingsView />);
+    const voice = await screen.findByLabelText("Speech models");
+    expect(voice.textContent).toContain("78 MB");
+    expect(calls.some((call) => call.cmd === "download_voice_models")).toBe(
+      false,
+    );
+    fireEvent.click(within(voice).getByRole("button", { name: "Download" }));
+    expect(calls.some((call) => call.cmd === "download_voice_models")).toBe(
+      true,
     );
   });
 });

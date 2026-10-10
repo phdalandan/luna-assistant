@@ -15,6 +15,8 @@ pub struct Settings {
     /// Changed only by selecting an installed model, never by saving the form.
     pub active_model: Option<String>,
     pub context_length: u32,
+    /// Changed only from the listening control, never by saving the form.
+    pub listening: bool,
 }
 
 impl Default for Settings {
@@ -23,6 +25,7 @@ impl Default for Settings {
             home_assistant_url: String::new(),
             active_model: None,
             context_length: 4096,
+            listening: false,
         }
     }
 }

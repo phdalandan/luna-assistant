@@ -8,9 +8,11 @@ mod history;
 mod home_assistant;
 mod inference;
 mod lifecycle;
+mod listening;
 mod models;
 mod settings;
 mod tls;
+mod voice;
 
 use std::sync::Arc;
 
@@ -25,6 +27,7 @@ const STATUS_EVENT: &str = "status-changed";
 const MODELS_EVENT: &str = "models-changed";
 const PROGRESS_EVENT: &str = "download-progress";
 const CONVERSATION_EVENT: &str = "conversation-cleared";
+const INTERACTIONS_EVENT: &str = "interactions-changed";
 
 struct FrontendEvents(AppHandle);
 
@@ -86,6 +89,7 @@ pub fn run() {
             exit_on_terminate(app.handle());
 
             lifecycle::setup_tray(app)?;
+            resume_listening(app.handle());
             if !lifecycle::starts_hidden(std::env::args()) {
                 lifecycle::show_main_window(app.handle());
             }
@@ -112,6 +116,10 @@ pub fn run() {
             commands::clear_history,
             commands::get_launch_at_login,
             commands::set_launch_at_login,
+            commands::set_listening,
+            commands::get_voice_models,
+            commands::download_voice_models,
+            commands::cancel_voice_download,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Luna");
@@ -119,6 +127,8 @@ pub fn run() {
     app.run(|app, event| match event {
         // Never leave a model loaded in a background process after Luna quits.
         tauri::RunEvent::Exit => {
+            // Stops the microphone and the voice thread before anything else shuts down.
+            app.state::<AppState>().voice.stop();
             let engine = app.state::<AppState>().engine.clone();
             tauri::async_runtime::block_on(engine.unload());
         }
@@ -146,6 +156,17 @@ fn exit_on_terminate(app: &AppHandle) {
 
 #[cfg(not(unix))]
 fn exit_on_terminate(_: &AppHandle) {}
+
+/// Turns listening back on at launch if the user left it on.
+fn resume_listening(app: &AppHandle) {
+    let enabled = app
+        .state::<AppState>()
+        .settings()
+        .is_ok_and(|settings| settings.listening);
+    if enabled && let Err(error) = listening::start(app) {
+        log::warn!("listening did not resume: {error}");
+    }
+}
 
 /// Sends connection and model status changes to the frontend as they happen.
 fn forward_status(app: &AppHandle) {

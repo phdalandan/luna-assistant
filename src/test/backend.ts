@@ -6,11 +6,13 @@ export const settings: Settings = {
   homeAssistantUrl: "http://homeassistant.local:8123",
   activeModel: null,
   contextLength: 4096,
+  listening: false,
 };
 
 export const status: Status = {
   homeAssistant: "connected",
   engine: { state: "idle" },
+  voice: { state: "off", problem: null },
 };
 
 export function model(overrides: Partial<ModelInfo> = {}): ModelInfo {
@@ -42,6 +44,11 @@ export function mockBackend(overrides: Record<string, Handler> = {}) {
     get_status: () => status,
     list_models: () => [model()],
     list_interactions: () => [],
+    get_voice_models: () => ({
+      installed: false,
+      size: 78_000_000,
+      download: null,
+    }),
     prepare_assistant: () => null,
     "plugin:event|listen": () => 1,
     "plugin:event|unlisten": () => undefined,

@@ -3,8 +3,13 @@ use std::sync::OnceLock;
 
 use serde::Deserialize;
 
+use super::speech::{DownloadFile, SpeechCatalog};
+use super::store::Artifact;
+
 const CATALOG: &str = include_str!("../../models.json");
 const TRUSTED_HOST: &str = "huggingface.co";
+/// Speech models published only as sherpa-onnx release assets. Checksums still apply.
+const TRUSTED_RELEASES: (&str, &str) = ("github.com", "/k2-fsa/sherpa-onnx/releases/download/");
 
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -25,6 +30,24 @@ pub struct CatalogModel {
     pub chat: ChatOptions,
 }
 
+impl Artifact for CatalogModel {
+    fn url(&self) -> &str {
+        &self.url
+    }
+
+    fn file_name(&self) -> &str {
+        &self.file_name
+    }
+
+    fn size(&self) -> u64 {
+        self.size
+    }
+
+    fn sha256(&self) -> &str {
+        &self.sha256
+    }
+}
+
 /// Model-specific generation settings. All model-specific behaviour lives here.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +62,7 @@ pub struct ChatOptions {
 #[serde(deny_unknown_fields)]
 struct Catalog {
     models: Vec<CatalogModel>,
+    speech: SpeechCatalog,
 }
 
 #[derive(Debug, PartialEq, Eq, thiserror::Error)]
@@ -59,9 +83,17 @@ pub enum CatalogError {
     Recommendation,
 }
 
+fn catalog() -> &'static Catalog {
+    static PARSED: OnceLock<Catalog> = OnceLock::new();
+    PARSED.get_or_init(|| parse(CATALOG).expect("bundled model catalog is valid"))
+}
+
 pub fn models() -> &'static [CatalogModel] {
-    static MODELS: OnceLock<Vec<CatalogModel>> = OnceLock::new();
-    MODELS.get_or_init(|| parse(CATALOG).expect("bundled model catalog is valid"))
+    &catalog().models
+}
+
+pub fn speech() -> &'static SpeechCatalog {
+    &catalog().speech
 }
 
 #[cfg(test)]
@@ -69,7 +101,7 @@ pub fn find(id: &str) -> Option<&'static CatalogModel> {
     models().iter().find(|model| model.id == id)
 }
 
-fn parse(json: &str) -> Result<Vec<CatalogModel>, CatalogError> {
+fn parse(json: &str) -> Result<Catalog, CatalogError> {
     let catalog: Catalog =
         serde_json::from_str(json).map_err(|error| CatalogError::Json(error.to_string()))?;
     let mut ids = HashSet::new();
@@ -81,24 +113,19 @@ fn parse(json: &str) -> Result<Vec<CatalogModel>, CatalogError> {
         if !url.is_some_and(|url| url.scheme() == "https" && url.host_str() == Some(TRUSTED_HOST)) {
             return Err(CatalogError::InvalidUrl(model.id.clone()));
         }
-        let safe_name = model
-            .file_name
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'));
-        if !safe_name || !model.file_name.ends_with(".gguf") || model.file_name.starts_with('.') {
+        if !safe_file_name(&model.file_name) || !model.file_name.ends_with(".gguf") {
             return Err(CatalogError::InvalidFileName(model.id.clone()));
         }
-        let is_hex = model.sha256.len() == 64
-            && model
-                .sha256
-                .chars()
-                .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
-        if !is_hex {
-            return Err(CatalogError::InvalidChecksum(model.id.clone()));
-        }
-        if model.size == 0 {
-            return Err(CatalogError::InvalidSize(model.id.clone()));
-        }
+        check_download(&model.id, &model.sha256, model.size)?;
+    }
+    for file in catalog.speech.files() {
+        check_speech_file(file)?;
+    }
+    let wake_word = &catalog.speech.wake_word;
+    if !wake_word.extracted_files().into_iter().all(safe_file_name) {
+        return Err(CatalogError::InvalidFileName(
+            wake_word.archive.file_name.clone(),
+        ));
     }
     if catalog
         .models
@@ -109,7 +136,45 @@ fn parse(json: &str) -> Result<Vec<CatalogModel>, CatalogError> {
     {
         return Err(CatalogError::Recommendation);
     }
-    Ok(catalog.models)
+    Ok(catalog)
+}
+
+fn safe_file_name(name: &str) -> bool {
+    !name.starts_with('.')
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+}
+
+fn check_download(id: &str, sha256: &str, size: u64) -> Result<(), CatalogError> {
+    let is_hex = sha256.len() == 64
+        && sha256
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c));
+    if !is_hex {
+        return Err(CatalogError::InvalidChecksum(id.to_owned()));
+    }
+    if size == 0 {
+        return Err(CatalogError::InvalidSize(id.to_owned()));
+    }
+    Ok(())
+}
+
+fn check_speech_file(file: &DownloadFile) -> Result<(), CatalogError> {
+    let id = &file.file_name;
+    let trusted = url::Url::parse(&file.url).ok().is_some_and(|url| {
+        let host = url.host_str();
+        let release =
+            host == Some(TRUSTED_RELEASES.0) && url.path().starts_with(TRUSTED_RELEASES.1);
+        url.scheme() == "https" && (host == Some(TRUSTED_HOST) || release)
+    });
+    if !trusted {
+        return Err(CatalogError::InvalidUrl(id.clone()));
+    }
+    if !safe_file_name(id) {
+        return Err(CatalogError::InvalidFileName(id.clone()));
+    }
+    check_download(id, &file.sha256, file.size)
 }
 
 #[cfg(test)]
@@ -121,12 +186,12 @@ mod tests {
     fn catalog_with(change: impl FnOnce(&mut Value)) -> Result<Vec<CatalogModel>, CatalogError> {
         let mut value: Value = serde_json::from_str(CATALOG).unwrap();
         change(&mut value);
-        parse(&value.to_string())
+        parse(&value.to_string()).map(|catalog| catalog.models)
     }
 
     #[test]
     fn bundled_catalog_is_valid() {
-        let models = parse(CATALOG).unwrap();
+        let models = parse(CATALOG).unwrap().models;
         let ids: Vec<_> = models.iter().map(|model| model.id.as_str()).collect();
         assert_eq!(ids, ["qwen3-8b", "qwen3-4b", "gemma-3-12b"]);
         assert!(find("qwen3-8b").unwrap().recommended);
@@ -168,6 +233,22 @@ mod tests {
         assert_eq!(duplicate, Err(CatalogError::DuplicateId("qwen3-8b".into())));
         let unknown = catalog_with(|catalog| catalog["models"][0]["mirror"] = json!("x"));
         assert!(matches!(unknown, Err(CatalogError::Json(_))));
+    }
+
+    #[test]
+    fn speech_files_must_come_from_trusted_sources() {
+        let result = catalog_with(|catalog| {
+            catalog["speech"]["speech_detection"]["file"]["url"] =
+                json!("https://github.com/someone/else/releases/download/x/silero_vad.onnx");
+        });
+        assert_eq!(
+            result,
+            Err(CatalogError::InvalidUrl("silero_vad.onnx".into()))
+        );
+        let result = catalog_with(|catalog| {
+            catalog["speech"]["wake_word"]["tokens"] = json!("../tokens.txt");
+        });
+        assert!(matches!(result, Err(CatalogError::InvalidFileName(_))));
     }
 
     #[test]
