@@ -167,10 +167,11 @@ describe("SettingsView", () => {
     const calls = mockBackend();
     render(<SettingsView />);
     expect(await screen.findByText("Qwen3 8B")).toBeTruthy();
-    const local = screen.getByRole("radio", { name: "Local" });
+    const ai = within(screen.getByRole("radiogroup", { name: "AI location" }));
+    const local = ai.getByRole("radio", { name: "Local" });
     expect(local.getAttribute("aria-checked")).toBe("true");
 
-    fireEvent.click(screen.getByRole("radio", { name: "Cloud" }));
+    fireEvent.click(ai.getByRole("radio", { name: "Cloud" }));
 
     expect(
       calls.find((call) => call.cmd === "set_inference_mode")?.args,
@@ -216,7 +217,7 @@ describe("SettingsView", () => {
       expect(
         calls.find((call) => call.cmd === "save_settings")?.args,
       ).toMatchObject({
-        apiKey: "secret-key",
+        apiKeys: { anthropic: "secret-key" },
         settings: {
           cloudProvider: "anthropic",
           anthropicModel: "claude-sonnet-5",
@@ -227,6 +228,36 @@ describe("SettingsView", () => {
     await waitFor(() => expect(key.value).toBe(""));
     expect(key.type).toBe("password");
     expect(key.placeholder).toBe("Saved");
+  });
+
+  it("sends speech to OpenAI only after switching speech recognition to cloud", async () => {
+    const calls = mockBackend({
+      save_settings: (args) => (args as { settings: unknown }).settings,
+    });
+    render(<SettingsView />);
+    const speech = within(
+      await screen.findByRole("radiogroup", { name: "Speech recognition" }),
+    );
+    expect(screen.queryByLabelText("OpenAI API key")).toBeNull();
+
+    fireEvent.click(speech.getByRole("radio", { name: "Cloud" }));
+
+    expect(
+      calls.find((call) => call.cmd === "set_speech_recognition")?.args,
+    ).toEqual({ mode: "cloud" });
+    expect(calls.some((call) => call.cmd === "set_inference_mode")).toBe(false);
+    expect(
+      screen.getByText("What you say after the wake word is sent to OpenAI."),
+    ).toBeTruthy();
+    fireEvent.change(screen.getByLabelText("OpenAI API key"), {
+      target: { value: "openai-key" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.cmd === "save_settings")?.args,
+      ).toMatchObject({ apiKeys: { openai: "openai-key" } }),
+    );
   });
 
   it("removes a saved API key", async () => {

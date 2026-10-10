@@ -65,6 +65,12 @@ const DOMAIN_WORDS: &[(&str, &[&str])] = &[
         ],
     ),
     ("sensor", &["temperature", "humidity", "power", "energy"]),
+    (
+        "weather",
+        &[
+            "weather", "outside", "rain", "forecast", "sunny", "cloudy", "cloud", "snow", "wind",
+        ],
+    ),
     ("lock", &["lock", "unlock", "door"]),
     (
         "media_player",
@@ -215,9 +221,15 @@ fn details(entity: &Entity) -> String {
             (brightness * 100.0 / 255.0).round()
         ));
     }
+    // A weather entity's temperature is the outdoor reading, not a target.
+    let temperature = if entity.domain() == "weather" {
+        "temperature"
+    } else {
+        "target"
+    };
     for (key, label) in [
         ("current_temperature", "current"),
-        ("temperature", "target"),
+        ("temperature", temperature),
     ] {
         if let Some(value) = entity.attributes.get(key).and_then(Value::as_f64) {
             details.push(format!("{label} {value}°"));

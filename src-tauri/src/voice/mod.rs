@@ -29,6 +29,7 @@ pub use conversation::Timing;
 pub use keyword::is_valid_name as is_valid_wake_word;
 use listener::Listener;
 pub use speak::bundled_helper;
+pub use transcribe::vocabulary_prompt;
 
 /// All voice processing runs on 16 kHz mono audio.
 pub const SAMPLE_RATE: u32 = 16_000;
@@ -49,6 +50,12 @@ pub enum VoiceError {
     Capture(#[from] CaptureError),
 }
 
+/// A cloud transcription that failed, with the reply that tells the user what to do next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptionFailed {
+    pub reply: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
 #[serde(rename_all = "camelCase")]
@@ -67,6 +74,8 @@ pub trait Host: Send + Sync + 'static {
     fn relevance(&self, text: &str) -> Relevance;
     /// Names of rooms and devices in the home, so transcription spells them correctly.
     fn vocabulary(&self) -> String;
+    /// Transcribes 16 kHz audio with the cloud provider, when the user chose cloud recognition.
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscriptionFailed>;
     /// Cancels a request in progress, if any.
     fn cancel(&self);
     /// How loud the microphone is, from 0 to 1, a few times a second while listening.
@@ -92,6 +101,8 @@ pub struct VoiceSettings {
     /// A voice id from the catalogue, such as "af_heart".
     pub voice: String,
     pub helper: PathBuf,
+    /// Requests are transcribed by the host's cloud provider instead of whisper.cpp.
+    pub cloud_transcription: bool,
 }
 
 enum Input {

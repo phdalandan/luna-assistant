@@ -1,6 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import type { ConnectionStatus } from "../bindings/ConnectionStatus";
+import { ApiKeyField } from "../components/ApiKeyField";
 import { CloudSettings } from "../components/CloudSettings";
+import { ModeControl } from "../components/ModeControl";
 import { ModelList } from "../components/ModelList";
 import { VoiceModels } from "../components/VoiceModels";
 import {
@@ -17,10 +19,16 @@ import { useModels, useStatus } from "../lib/hooks";
 
 const CONTEXT_LENGTHS = [4096, 8192, 16384, 32768];
 
-const INFERENCE_MODES: { mode: InferenceMode; label: string }[] = [
-  { mode: "local", label: "Local" },
-  { mode: "cloud", label: "Cloud" },
-];
+type ApiKeys = Partial<Record<CloudProvider, string>>;
+
+/** Keys the user typed, without blanks. */
+function typedKeys(keys: ApiKeys): ApiKeys {
+  return Object.fromEntries(
+    Object.entries(keys)
+      .map(([provider, key]) => [provider, key.trim()])
+      .filter(([, key]) => key !== ""),
+  );
+}
 
 const CONNECTION_BADGES: Partial<
   Record<ConnectionStatus, { label: string; tone: string }>
@@ -44,7 +52,7 @@ export function SettingsView() {
   const [draft, setDraft] = useState<Settings | null>(null);
   const [token, setToken] = useState("");
   const [hasToken, setHasToken] = useState(false);
-  const [apiKey, setApiKey] = useState("");
+  const [apiKeys, setApiKeys] = useState<ApiKeys>({});
   const [savedKeys, setSavedKeys] = useState<CloudProvider[]>([]);
   const [cloudModels, setCloudModels] = useState<CloudModelOption[]>([]);
   const [discovered, setDiscovered] = useState<DiscoveredInstance[]>([]);
@@ -93,10 +101,13 @@ export function SettingsView() {
 
   const update = (changes: Partial<Settings>) =>
     setDraft({ ...draft, ...changes });
+  const typed = typedKeys(apiKeys);
   const changed =
     token.trim() !== "" ||
-    apiKey.trim() !== "" ||
+    Object.keys(typed).length > 0 ||
     JSON.stringify(draft) !== JSON.stringify(saved);
+  const setApiKey = (provider: CloudProvider, key: string) =>
+    setApiKeys((keys) => ({ ...keys, [provider]: key }));
   const badge = status && CONNECTION_BADGES[status.homeAssistant];
   const connection = status && CONNECTION_MESSAGES[status.homeAssistant];
   const suggestions = discovered.filter(
@@ -112,7 +123,7 @@ export function SettingsView() {
       const settings = await api.saveSettings(
         draft,
         token.trim() || null,
-        apiKey.trim() || null,
+        typed,
       );
       setSaved(settings);
       setDraft(settings);
@@ -120,10 +131,12 @@ export function SettingsView() {
         settings.homeAssistantUrl !== "" && (hasToken || token.trim() !== ""),
       );
       setToken("");
-      if (apiKey.trim() !== "") {
-        setSavedKeys((keys) => [...keys, settings.cloudProvider]);
-        setApiKey("");
-      }
+      const added = Object.keys(typed) as CloudProvider[];
+      setSavedKeys((keys) => [
+        ...keys.filter((key) => !added.includes(key)),
+        ...added,
+      ]);
+      setApiKeys({});
     } catch (err) {
       setError(errorMessage(err));
     } finally {
@@ -138,10 +151,17 @@ export function SettingsView() {
 
   /** Switches immediately, like choosing a model, rather than waiting for Save. */
   function switchMode(inference: InferenceMode) {
-    if (!draft || inference === draft.inference) return;
+    if (!draft) return;
     setSaved((current) => current && { ...current, inference });
     setDraft({ ...draft, inference });
     run(() => api.setInferenceMode(inference));
+  }
+
+  function switchSpeechRecognition(speechRecognition: InferenceMode) {
+    if (!draft) return;
+    setSaved((current) => current && { ...current, speechRecognition });
+    setDraft({ ...draft, speechRecognition });
+    run(() => api.setSpeechRecognition(speechRecognition));
   }
 
   function removeKey(provider: CloudProvider) {
@@ -202,20 +222,11 @@ export function SettingsView() {
 
       <fieldset>
         <legend>AI Models</legend>
-        <div className="segmented" role="radiogroup" aria-label="AI location">
-          {INFERENCE_MODES.map(({ mode, label }) => (
-            <button
-              key={mode}
-              className="segment"
-              type="button"
-              role="radio"
-              aria-checked={draft.inference === mode}
-              onClick={() => switchMode(mode)}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <ModeControl
+          label="AI location"
+          value={draft.inference}
+          onChange={switchMode}
+        />
         {draft.inference === "local" ? (
           <>
             {models && <ModelList models={models} engine={status?.engine} />}
@@ -242,7 +253,7 @@ export function SettingsView() {
             settings={draft}
             update={update}
             models={cloudModels}
-            apiKey={apiKey}
+            apiKey={apiKeys[draft.cloudProvider] ?? ""}
             setApiKey={setApiKey}
             savedKeys={savedKeys}
             removeKey={removeKey}
@@ -253,6 +264,28 @@ export function SettingsView() {
       <fieldset>
         <legend>Voice</legend>
         <VoiceModels />
+        <div className="field">
+          <span>Speech recognition</span>
+          <ModeControl
+            label="Speech recognition"
+            value={draft.speechRecognition}
+            onChange={switchSpeechRecognition}
+          />
+        </div>
+        {draft.speechRecognition === "cloud" && (
+          <>
+            <ApiKeyField
+              label="OpenAI API key"
+              value={apiKeys.openai ?? ""}
+              onChange={(key) => setApiKey("openai", key)}
+              saved={savedKeys.includes("openai")}
+              onRemove={() => removeKey("openai")}
+            />
+            <p className="status-line">
+              What you say after the wake word is sent to OpenAI.
+            </p>
+          </>
+        )}
         <label className="field">
           <span>Wake word</span>
           <input

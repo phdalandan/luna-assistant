@@ -12,7 +12,7 @@ Luna is a privacy-first, local voice assistant for Home Assistant. It is a backg
 - Ask for clarification when a request is ambiguous or unsafe. Never guess.
 - Report success only after execution is verified. Never present proposed actions as completed.
 - Never invent entity IDs or assume devices, floors, or rooms exist.
-- Everything runs locally. Never send audio, transcripts, or home data to external services.
+- Everything runs locally by default. Send requests, home data, or spoken audio to a cloud provider only when the user chose Cloud for that feature in Settings, and only what that feature needs. The wake word detector never leaves the device.
 - Never expose credentials to the model. Store tokens only in the OS credential store. Never log them.
 - Only the wake-word detector runs continuously. Speech recognition and inference start on demand. The LLM is not loaded while idle.
 - Prefer event-driven code. No unnecessary polling.

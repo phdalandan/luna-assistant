@@ -822,9 +822,65 @@ fn final_text_removes_reasoning_and_em_dashes() {
     );
 }
 
+#[tokio::test]
+async fn the_home_s_time_is_always_in_the_request_context() {
+    let conversation = Conversation::new();
+    let model = ScriptedModel::new(vec![text("It's 5:19 PM.")]);
+    conversation.ask(&model, "Wutem is it right now").await;
+    assert_eq!(model.passes(), 1);
+    assert!(
+        model
+            .last_message()
+            .content
+            .contains("Time from Home Assistant:"),
+        "{}",
+        model.last_message().content
+    );
+}
+
+#[tokio::test]
+async fn weather_comes_from_the_home_s_weather_entity() {
+    let conversation = Conversation::new();
+    conversation.cache.update(|home| {
+        home.apply_state(
+            "weather.forecast_home",
+            Some(state(
+                "weather.forecast_home",
+                "partlycloudy",
+                json!({"friendly_name": "Forecast Home", "temperature": 18.5}),
+            )),
+        )
+    });
+    let model = ScriptedModel::new(vec![text("It's partly cloudy and 18.5°.")]);
+
+    conversation.ask(&model, "What's the weather like?").await;
+
+    let context = model.last_message().content;
+    assert!(
+        context.contains("[weather.forecast_home]: partlycloudy, temperature 18.5°"),
+        "{context}"
+    );
+    let readable = &tools::definitions()[0]["function"]["parameters"]["properties"]["target"]["properties"]
+        ["domains"]["items"]["enum"];
+    assert!(readable.as_array().unwrap().contains(&json!("weather")));
+}
+
+#[test]
+fn instructions_keep_every_answer_grounded_in_the_home() {
+    for rule in [
+        "Answer only from this home's data",
+        "call get_states before answering",
+        "Never offer to look something up",
+        "Never mention the request context",
+    ] {
+        assert!(INSTRUCTIONS.contains(rule), "{rule}");
+    }
+}
+
 fn cloud_client(server: &MockServer) -> CloudClient {
     let endpoints = Endpoints {
         openai: format!("{}/openai", server.uri()),
+        openai_transcription: format!("{}/transcriptions", server.uri()),
         anthropic: format!("{}/anthropic", server.uri()),
     };
     CloudClient::new(endpoints, DEFAULT_TIMEOUT).unwrap()

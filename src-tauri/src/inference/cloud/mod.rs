@@ -2,6 +2,7 @@
 //! Rust validates and executes them locally and never gives a provider access to Home Assistant.
 mod anthropic;
 mod openai;
+mod transcribe;
 
 use std::time::{Duration, Instant};
 
@@ -31,6 +32,7 @@ pub enum CloudFailure {
 #[derive(Debug, Clone)]
 pub struct Endpoints {
     pub openai: String,
+    pub openai_transcription: String,
     pub anthropic: String,
 }
 
@@ -38,6 +40,7 @@ impl Default for Endpoints {
     fn default() -> Self {
         Self {
             openai: "https://api.openai.com/v1/chat/completions".into(),
+            openai_transcription: "https://api.openai.com/v1/audio/transcriptions".into(),
             anthropic: "https://api.anthropic.com/v1/messages".into(),
         }
     }
@@ -92,41 +95,13 @@ impl CloudClient {
                 .header("anthropic-version", anthropic::VERSION)
                 .json(&anthropic::body(model, messages, tools)),
         };
-        let fail = |failure, detail: String| InferenceError::Cloud {
-            provider: model.provider,
-            failure,
-            detail,
-        };
-        let response = request
-            .timeout(self.timeout)
-            .send()
-            .await
-            .map_err(|error| {
-                if error.is_timeout() {
-                    InferenceError::Timeout
-                } else if error.is_builder() {
-                    fail(CloudFailure::Unauthorized, "unusable API key".into())
-                } else {
-                    fail(CloudFailure::Unreachable, error.to_string())
-                }
-            })?;
-        let status = response.status();
-        let body = match response.json::<Value>().await {
-            Ok(body) => body,
-            Err(error) if error.is_timeout() => return Err(InferenceError::Timeout),
-            Err(_) if !status.is_success() => Value::Null,
-            Err(error) => return Err(fail(CloudFailure::InvalidResponse, error.to_string())),
-        };
-        if !status.is_success() {
-            let (failure, detail) = classify(status, &body);
-            return Err(fail(failure, detail));
-        }
+        let body = self.send(model.provider, request).await?;
         let parsed = match model.provider {
             CloudProvider::OpenAi => openai::parse(&body),
             CloudProvider::Anthropic => anthropic::parse(&body),
         };
         let (message, usage) =
-            parsed.map_err(|error| fail(CloudFailure::InvalidResponse, error))?;
+            parsed.map_err(|error| failed(model.provider, CloudFailure::InvalidResponse, error))?;
         log::info!(
             "cloud inference: {} {}, input {} tokens ({} cached), output {} tokens in {} ms",
             model.provider.name(),
@@ -145,6 +120,57 @@ impl CloudClient {
                 ..Timings::default()
             },
         })
+    }
+
+    /// Sends one request without retrying and returns the body of a successful reply.
+    async fn send(
+        &self,
+        provider: CloudProvider,
+        request: reqwest::RequestBuilder,
+    ) -> Result<Value, InferenceError> {
+        let response = request
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_timeout() {
+                    InferenceError::Timeout
+                } else if error.is_builder() {
+                    failed(
+                        provider,
+                        CloudFailure::Unauthorized,
+                        "unusable API key".into(),
+                    )
+                } else {
+                    failed(provider, CloudFailure::Unreachable, error.to_string())
+                }
+            })?;
+        let status = response.status();
+        let body = match response.json::<Value>().await {
+            Ok(body) => body,
+            Err(error) if error.is_timeout() => return Err(InferenceError::Timeout),
+            Err(_) if !status.is_success() => Value::Null,
+            Err(error) => {
+                return Err(failed(
+                    provider,
+                    CloudFailure::InvalidResponse,
+                    error.to_string(),
+                ));
+            }
+        };
+        if !status.is_success() {
+            let (failure, detail) = classify(status, &body);
+            return Err(failed(provider, failure, detail));
+        }
+        Ok(body)
+    }
+}
+
+fn failed(provider: CloudProvider, failure: CloudFailure, detail: String) -> InferenceError {
+    InferenceError::Cloud {
+        provider,
+        failure,
+        detail,
     }
 }
 
@@ -195,6 +221,7 @@ mod tests {
         CloudClient::new(
             Endpoints {
                 openai: format!("{}{OPENAI_PATH}", server.uri()),
+                openai_transcription: format!("{}/v1/audio/transcriptions", server.uri()),
                 anthropic: format!("{}{ANTHROPIC_PATH}", server.uri()),
             },
             timeout,
@@ -421,6 +448,7 @@ mod tests {
         let client = CloudClient::new(
             Endpoints {
                 openai: "http://127.0.0.1:1/v1/chat/completions".into(),
+                openai_transcription: "http://127.0.0.1:1/v1/audio/transcriptions".into(),
                 anthropic: "http://127.0.0.1:1/v1/messages".into(),
             },
             DEFAULT_TIMEOUT,

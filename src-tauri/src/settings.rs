@@ -34,6 +34,8 @@ pub struct Settings {
     pub voice: String,
     /// Changed only from the Local and Cloud control, never by saving the form.
     pub inference: InferenceMode,
+    /// Where spoken requests are transcribed. Changed only from its own control.
+    pub speech_recognition: InferenceMode,
     pub cloud_provider: CloudProvider,
     pub openai_model: String,
     pub anthropic_model: String,
@@ -49,6 +51,7 @@ impl Default for Settings {
             wake_word: "Luna".into(),
             voice: "af_heart".into(),
             inference: InferenceMode::Local,
+            speech_recognition: InferenceMode::Local,
             cloud_provider: CloudProvider::OpenAi,
             openai_model: catalog::default_cloud_model(CloudProvider::OpenAi),
             anthropic_model: catalog::default_cloud_model(CloudProvider::Anthropic),
@@ -100,6 +103,7 @@ impl Settings {
             active_model: current.active_model.clone(),
             listening: current.listening,
             inference: current.inference,
+            speech_recognition: current.speech_recognition,
             ..form.validated()?
         })
     }
@@ -296,6 +300,7 @@ mod tests {
     fn new_installations_use_local_inference() {
         let settings = Settings::default();
         assert_eq!(settings.inference, InferenceMode::Local);
+        assert_eq!(settings.speech_recognition, InferenceMode::Local);
         assert_eq!(settings.cloud_model(CloudProvider::OpenAi), "gpt-6-luna");
         assert_eq!(
             settings.cloud_model(CloudProvider::Anthropic),
@@ -320,7 +325,9 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert!(json.contains(r#""inference":"cloud","cloudProvider":"anthropic""#));
+        assert!(json.contains(
+            r#""inference":"cloud","speechRecognition":"local","cloudProvider":"anthropic""#
+        ));
     }
 
     #[test]
@@ -341,6 +348,7 @@ mod tests {
     fn saving_the_form_keeps_the_inference_mode_and_model() {
         let current = Settings {
             inference: InferenceMode::Cloud,
+            speech_recognition: InferenceMode::Cloud,
             active_model: Some("qwen3-8b".into()),
             listening: true,
             ..valid()
@@ -351,6 +359,7 @@ mod tests {
         };
         let saved = Settings::from_form(form, &current).unwrap();
         assert_eq!(saved.inference, InferenceMode::Cloud);
+        assert_eq!(saved.speech_recognition, InferenceMode::Cloud);
         assert_eq!(saved.active_model.as_deref(), Some("qwen3-8b"));
         assert!(saved.listening);
         assert_eq!(saved.cloud_provider, CloudProvider::Anthropic);

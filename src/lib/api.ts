@@ -39,8 +39,8 @@ export const api = {
   saveSettings: (
     settings: Settings,
     token: string | null,
-    apiKey: string | null,
-  ) => invoke<Settings>("save_settings", { settings, token, apiKey }),
+    apiKeys: Partial<Record<CloudProvider, string>>,
+  ) => invoke<Settings>("save_settings", { settings, token, apiKeys }),
   hasHomeAssistantToken: () => invoke<boolean>("has_home_assistant_token"),
   savedApiKeys: () => invoke<CloudProvider[]>("saved_api_keys"),
   removeApiKey: (provider: CloudProvider) =>
@@ -48,6 +48,8 @@ export const api = {
   listCloudModels: () => invoke<CloudModelOption[]>("list_cloud_models"),
   setInferenceMode: (mode: InferenceMode) =>
     invoke<null>("set_inference_mode", { mode }),
+  setSpeechRecognition: (mode: InferenceMode) =>
+    invoke<null>("set_speech_recognition", { mode }),
   discoverHomeAssistant: () =>
     invoke<DiscoveredInstance[]>("discover_home_assistant"),
   getStatus: () => invoke<Status>("get_status"),

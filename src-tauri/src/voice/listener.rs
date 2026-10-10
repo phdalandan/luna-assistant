@@ -33,10 +33,17 @@ const LEVEL_INTERVAL: Duration = Duration::from_millis(50);
 /// Normal speech reaches about this RMS; louder audio shows as the full level.
 const LOUD: f32 = 0.1;
 
+/// Turns a request's audio into text.
+enum Recognizer {
+    Local(Transcriber),
+    /// The host sends the audio to the cloud provider the user chose.
+    Cloud,
+}
+
 /// Models that only exist while Luna is being spoken to.
 struct Active {
     detector: SpeechDetector,
-    transcriber: Transcriber,
+    recognizer: Recognizer,
     speaker: Speaker,
     segments: Vec<Segment>,
     /// Where the wake word fired, in detector samples. `None` for follow-ups.
@@ -44,7 +51,12 @@ struct Active {
 }
 
 enum Interpretation {
-    Request { text: String, ends: bool },
+    Request {
+        text: String,
+        ends: bool,
+    },
+    /// Transcription failed with a reply that says what to do.
+    Failed(String),
     NameOnly,
     Closing,
     Ignore,
@@ -209,8 +221,14 @@ impl Listener {
         let speech = catalog::speech();
         let detector =
             SpeechDetector::load(&self.files.speech_detection, &speech.speech_detection)?;
-        let mut transcriber = Transcriber::load(&self.files.transcription, &speech.transcription)?;
-        transcriber.expect_words(&self.host.vocabulary())?;
+        let recognizer = if self.settings.cloud_transcription {
+            Recognizer::Cloud
+        } else {
+            let mut transcriber =
+                Transcriber::load(&self.files.transcription, &speech.transcription)?;
+            transcriber.expect_words(&self.host.vocabulary())?;
+            Recognizer::Local(transcriber)
+        };
         let sender = self.sender.clone();
         let speaker = Speaker::new(
             &self.settings.helper,
@@ -223,7 +241,7 @@ impl Listener {
         )?;
         Ok(Active {
             detector,
-            transcriber,
+            recognizer,
             speaker,
             segments: Vec::new(),
             wake_at: None,
@@ -281,16 +299,20 @@ impl Listener {
             return;
         };
         let audio = utterance(std::mem::take(&mut active.segments));
-        let text = if audio.is_empty() {
-            Ok(String::new())
-        } else {
-            active.transcriber.transcribe(&audio)
+        let text = match &mut active.recognizer {
+            _ if audio.is_empty() => Ok(String::new()),
+            Recognizer::Local(transcriber) => transcriber.transcribe(&audio).map_err(|_| None),
+            Recognizer::Cloud => self
+                .host
+                .transcribe(&audio)
+                .map_err(|failed| Some(failed.reply)),
         };
         drop(audio);
         let interpretation = match text {
             Ok(text) => self.interpret(&text, follow_up),
             Err(_) if follow_up => Interpretation::Ignore,
-            Err(_) => Interpretation::Request {
+            Err(Some(reply)) => Interpretation::Failed(reply),
+            Err(None) => Interpretation::Request {
                 text: String::new(),
                 ends: false,
             },
@@ -305,6 +327,10 @@ impl Listener {
                     self.host.respond(&text)
                 };
                 self.reply(&reply, ends);
+            }
+            Interpretation::Failed(reply) => {
+                self.conversation.heard(Heard::Request, now);
+                self.reply(&reply, false);
             }
             Interpretation::NameOnly => {
                 self.conversation.heard(Heard::Request, now);

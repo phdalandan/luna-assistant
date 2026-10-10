@@ -41,7 +41,10 @@ Requests like \"I'm heading to bed\" or \"it's too warm\" are about the home. \
 For questions unrelated to the home, reply exactly: I can only help with your home. Never use that reply after calling a tool.
 
 Rules:
-- Use control to change devices. Use get_states for states not listed in the request context.
+- Answer only from this home's data: the request context and tool results. Use control to change devices. \
+When a state you need is not in the request context, call get_states before answering. \
+Never offer to look something up, never say you cannot check, and never answer from general knowledge.
+- If asked about an earlier answer, check the device again with get_states. Never take an answer back without checking.
 - The request context shows the true current states. Never say something changed unless control changed it in this turn. \
 If the user says an action did not work, call control again. If the user only states or disputes a state, report the current state and change nothing.
 - Only use floor, area, and entity IDs from the home layout, the request context, or tool results. Never invent IDs or devices.
@@ -55,6 +58,7 @@ Only when the user names an exception, use one control call with exclude_entitie
 - If a request is ambiguous, or a tool call is rejected and you cannot fix it, ask one short question.
 - Luna asks the user to confirm unlocking and opening doors. Just call control.
 - Never state the time unless the request context gives it.
+- Never mention the request context, tools, or IDs.
 - Reply in one short sentence. Do not repeat the request. Never use em dashes.";
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
@@ -541,12 +545,9 @@ fn system_prompt<A>(home: &Home<'_, A>) -> String {
 
 fn user_prompt<A>(home: &Home<'_, A>, memory: &Memory, request: &str) -> String {
     let snapshot = home.cache.read();
-    let mentions_time = request
-        .to_lowercase()
-        .split(|c: char| !c.is_alphanumeric())
-        .any(|word| word == "time");
-    let time = match mentions_time.then(|| clock::read(&snapshot)) {
-        Some(clock::ClockReading::Time(time)) => Some(time),
+    // Always included, so a misheard "what time is it" is still answered from the home's clock.
+    let time = match clock::read(&snapshot) {
+        clock::ClockReading::Time(time) => Some(time),
         _ => None,
     };
     let context = context::request_context(&snapshot, memory, request, time.as_deref());

@@ -53,9 +53,7 @@ impl Transcriber {
     /// Primes recognition with names from the home, such as "Front Porch, Bedroom AC", so they
     /// are spelled as Home Assistant has them rather than as similar-sounding words.
     pub fn expect_words(&mut self, words: &str) -> Result<(), VoiceError> {
-        // whisper-rs misreads text over its token limit (undefined behaviour), so the limit is the
-        // byte length: a whisper token is never shorter than one byte.
-        let text = leading_names(words, MAX_PROMPT_CHARS);
+        let text = vocabulary_prompt(words);
         let mut tokens = self
             .context
             .tokenize(text, text.len().max(1))
@@ -96,6 +94,12 @@ impl Transcriber {
         }
         Ok(text.trim().to_owned())
     }
+}
+
+/// The names used to prime transcription, locally or in the cloud. whisper-rs misreads text over
+/// its token limit, so the limit is in bytes: a whisper token is never shorter than one byte.
+pub fn vocabulary_prompt(words: &str) -> &str {
+    leading_names(words, MAX_PROMPT_CHARS)
 }
 
 /// Whole names from the start of a comma-separated list, within `limit` bytes. A token never

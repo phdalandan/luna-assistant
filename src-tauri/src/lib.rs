@@ -108,6 +108,7 @@ pub fn run() {
             commands::remove_api_key,
             commands::list_cloud_models,
             commands::set_inference_mode,
+            commands::set_speech_recognition,
             commands::discover_home_assistant,
             commands::get_status,
             commands::list_models,

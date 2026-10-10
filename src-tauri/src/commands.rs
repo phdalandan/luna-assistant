@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -6,7 +7,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 use tauri_plugin_autostart::ManagerExt;
 
-use crate::assistant::{self, CONVERSATION_LIFETIME, Home, Provider, Session};
+use crate::assistant::{self, AssistantError, CONVERSATION_LIFETIME, Home, Provider, Session};
 use crate::credentials::{self, AccessToken};
 use crate::error::{AppError, CommandError};
 use crate::history::{self, Interaction};
@@ -215,6 +216,26 @@ impl AppState {
         Ok(())
     }
 
+    /// Transcribes a spoken request with OpenAI, the only provider with speech-to-text.
+    /// Stopping listening cancels it like any other request.
+    pub async fn transcribe(
+        &self,
+        samples: &[f32],
+        sample_rate: u32,
+        prompt: &str,
+    ) -> Result<String, AppError> {
+        let provider = CloudProvider::OpenAi;
+        let key = credentials::load_api_key(provider)?.ok_or(AppError::NoApiKey(provider))?;
+        let cancel = self.session.begin()?;
+        let _finished = SessionGuard(&self.session);
+        let model = catalog::cloud_transcription();
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(AssistantError::Cancelled.into()),
+            text = self.cloud.transcribe(model, &key, samples, sample_rate, prompt) => Ok(text?),
+        }
+    }
+
     /// The provider for the saved choice. A missing key or model is an error, never a fallback.
     fn provider(&self, settings: &Settings) -> Result<Provider<'_>, AppError> {
         if settings.inference == InferenceMode::Local {
@@ -270,7 +291,7 @@ pub fn save_settings(
     state: State<'_, AppState>,
     settings: Settings,
     token: Option<String>,
-    api_key: Option<String>,
+    api_keys: HashMap<CloudProvider, String>,
 ) -> Result<Settings, CommandError> {
     let previous = state.settings()?;
     let settings = Settings::from_form(settings, &previous)?;
@@ -278,8 +299,10 @@ pub fn save_settings(
     if let Some(token) = &token {
         credentials::save_home_assistant_token(token)?;
     }
-    if let Some(key) = api_key.and_then(AccessToken::new) {
-        credentials::save_api_key(settings.cloud_provider, &key)?;
+    for (provider, key) in api_keys {
+        if let Some(key) = AccessToken::new(key) {
+            credentials::save_api_key(provider, &key)?;
+        }
     }
     if settings.home_assistant_url.is_empty() {
         credentials::delete_home_assistant_token()?;
@@ -348,6 +371,32 @@ pub fn list_cloud_models() -> Vec<CloudModelOption> {
             name: model.name.clone(),
         })
         .collect()
+}
+
+/// Switches where spoken requests are transcribed. Listening restarts to use the new choice.
+#[tauri::command]
+pub fn set_speech_recognition(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    mode: InferenceMode,
+) -> Result<(), CommandError> {
+    let current = state.settings()?;
+    if current.speech_recognition == mode {
+        return Ok(());
+    }
+    let settings = Settings {
+        speech_recognition: mode,
+        ..current
+    };
+    settings::save(&state.db(), &settings)?;
+    if settings.listening {
+        tauri::async_runtime::spawn_blocking(move || {
+            if let Err(error) = listening::start(&app) {
+                log::warn!("listening did not restart with the new speech recognition: {error}");
+            }
+        });
+    }
+    Ok(())
 }
 
 /// Switches between Local and Cloud without restarting Luna or clearing the conversation.

@@ -149,6 +149,8 @@ struct FakeHost {
     release: Mutex<Option<mpsc::Sender<()>>>,
     /// When each reply was requested, and when its voice was first heard.
     replies: Mutex<Vec<(Instant, Option<Instant>)>>,
+    /// What the cloud provider returns, for cloud recognition.
+    cloud_transcript: Mutex<Result<String, TranscriptionFailed>>,
 }
 
 impl FakeHost {
@@ -161,6 +163,7 @@ impl FakeHost {
             hold: Mutex::default(),
             release: Mutex::default(),
             replies: Mutex::default(),
+            cloud_transcript: Mutex::new(Ok(String::new())),
         })
     }
 
@@ -190,6 +193,10 @@ impl Host for FakeHost {
 
     fn vocabulary(&self) -> String {
         assistant::vocabulary(&self.home)
+    }
+
+    fn transcribe(&self, _: &[f32]) -> Result<String, TranscriptionFailed> {
+        self.cloud_transcript.lock().unwrap().clone()
     }
 
     fn cancel(&self) {
@@ -247,10 +254,15 @@ fn voice_settings(wake_word: &str) -> VoiceSettings {
         wake_word: wake_word.into(),
         voice: "af_heart".into(),
         helper,
+        cloud_transcription: false,
     }
 }
 
 fn start(host: Arc<FakeHost>) -> Running {
+    start_with(host, voice_settings("Luna"))
+}
+
+fn start_with(host: Arc<FakeHost>, settings: VoiceSettings) -> Running {
     let files = speech_files();
     let (input, receiver) = mpsc::sync_channel(AUDIO_QUEUE);
     let stopping = Arc::new(AtomicBool::new(false));
@@ -263,7 +275,7 @@ fn start(host: Arc<FakeHost>) -> Running {
     let thread = std::thread::spawn(move || {
         Listener::new(
             files,
-            voice_settings("Luna"),
+            settings,
             Timing::default(),
             SAMPLE_RATE,
             host,
@@ -388,6 +400,34 @@ fn wake_word_anywhere_follow_ups_and_unrelated_speech() {
         [VoiceError::Capture(CaptureError::Disconnected)]
     );
     assert_eq!(host.state(), Some(VoiceState::Off));
+}
+
+#[test]
+#[ignore = "needs speech models and recordings"]
+fn cloud_recognition_uses_the_provider_s_transcript_and_speaks_failures() {
+    let host = FakeHost::new();
+    *host.cloud_transcript.lock().unwrap() = Ok("Luna, what about the AC? Is it on?".into());
+    let settings = VoiceSettings {
+        cloud_transcription: true,
+        ..voice_settings("Luna")
+    };
+    let running = start_with(host.clone(), settings);
+
+    say(&running, "start-Zira");
+    wait_until("the request", || host.requests().len() == 1);
+    assert!(host.requests()[0].to_lowercase().contains("is it on"));
+    settle(&host);
+
+    *host.cloud_transcript.lock().unwrap() = Err(TranscriptionFailed {
+        reply: "Unable to connect to OpenAI.".into(),
+    });
+    say(&running, "follow_thanks");
+    settle(&host);
+    // A failed follow-up is dropped, like speech that was not meant for Luna.
+    assert_eq!(host.requests().len(), 1);
+
+    running.input.send(Input::Stop).unwrap();
+    running.thread.join().unwrap();
 }
 
 #[test]

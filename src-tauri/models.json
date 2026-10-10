@@ -93,6 +93,10 @@
       }
     }
   ],
+  "cloud_transcription": {
+    "id": "gpt-transcribe",
+    "form": { "languages[]": "en" }
+  },
   "speech": {
     "wake_word": {
       "archive": {

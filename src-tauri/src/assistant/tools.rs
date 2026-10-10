@@ -7,7 +7,7 @@ pub const GET_STATES: &str = "get_states";
 pub const CONTROL: &str = "control";
 
 /// Device types the model can read. Control only offers the ones it can change.
-const READABLE_DOMAINS: [&str; 14] = [
+const READABLE_DOMAINS: [&str; 15] = [
     "light",
     "switch",
     "fan",
@@ -22,6 +22,7 @@ const READABLE_DOMAINS: [&str; 14] = [
     "binary_sensor",
     "alarm_control_panel",
     "person",
+    "weather",
 ];
 const CONTROLLABLE_DOMAINS: usize = 10;
 

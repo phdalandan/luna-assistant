@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
@@ -89,6 +89,17 @@ pub struct CloudModel {
     pub request: Map<String, Value>,
 }
 
+/// OpenAI speech-to-text, for users who choose cloud speech recognition. Anthropic offers none.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CloudTranscription {
+    pub id: String,
+    /// Model-specific form fields, such as language hints.
+    pub form: BTreeMap<String, String>,
+}
+
+const RESERVED_FORM_FIELDS: [&str; 5] = ["model", "file", "prompt", "response_format", "stream"];
+
 /// Request fields Luna sets itself, which a catalogue entry must never override.
 const RESERVED_REQUEST_FIELDS: [&str; 10] = [
     "model",
@@ -108,6 +119,7 @@ const RESERVED_REQUEST_FIELDS: [&str; 10] = [
 struct Catalog {
     models: Vec<CatalogModel>,
     cloud: Vec<CloudModel>,
+    cloud_transcription: CloudTranscription,
     speech: SpeechCatalog,
 }
 
@@ -148,6 +160,10 @@ pub fn speech() -> &'static SpeechCatalog {
 
 pub fn cloud_models() -> &'static [CloudModel] {
     &catalog().cloud
+}
+
+pub fn cloud_transcription() -> &'static CloudTranscription {
+    &catalog().cloud_transcription
 }
 
 pub fn cloud_model(provider: CloudProvider, id: &str) -> Option<&'static CloudModel> {
@@ -220,6 +236,15 @@ fn parse(json: &str) -> Result<Catalog, CatalogError> {
         return Err(CatalogError::Recommendation);
     }
     check_cloud_models(&catalog.cloud)?;
+    let transcription = &catalog.cloud_transcription;
+    if transcription.id.is_empty()
+        || transcription
+            .form
+            .keys()
+            .any(|key| RESERVED_FORM_FIELDS.contains(&key.as_str()))
+    {
+        return Err(CatalogError::InvalidCloudModel(transcription.id.clone()));
+    }
     Ok(catalog)
 }
 
@@ -379,6 +404,18 @@ mod tests {
             "claude-haiku-5-5"
         );
         assert!(cloud_model(CloudProvider::OpenAi, "claude-haiku-5-5").is_none());
+    }
+
+    #[test]
+    fn cloud_transcription_uses_the_verified_model() {
+        assert_eq!(cloud_transcription().id, "gpt-transcribe");
+        let result = catalog_with(|catalog| {
+            catalog["cloud_transcription"]["form"]["file"] = json!("other.wav");
+        });
+        assert_eq!(
+            result,
+            Err(CatalogError::InvalidCloudModel("gpt-transcribe".into()))
+        );
     }
 
     #[test]

@@ -44,7 +44,7 @@ The model loads when you first ask something and unloads after 5 minutes of inac
 
 ## Privacy
 
-With Local selected (the default), requests, Home Assistant data, and AI processing stay on your computer, and Luna connects to the internet only to download a model you chose. With Cloud selected, the text of a request and the home data needed to interpret it (room and floor names, relevant devices and their states, and the last few turns of the conversation) are sent to the provider you chose. Audio never leaves your computer, and Luna still controls Home Assistant itself; the provider never connects to it. The Home Assistant token and API keys are stored in the macOS Keychain or Windows Credential Manager.
+With Local selected (the default), requests, Home Assistant data, and AI processing stay on your computer, and Luna connects to the internet only to download a model you chose. With Cloud selected, the text of a request and the home data needed to interpret it (room and floor names, relevant devices and their states, and the last few turns of the conversation) are sent to the provider you chose. Luna still controls Home Assistant itself; the provider never connects to it. Audio stays on your computer unless you also choose Cloud for speech recognition: then what you say after the wake word is sent to OpenAI for transcription. The wake word is always detected locally. The Home Assistant token and API keys are stored in the macOS Keychain or Windows Credential Manager.
 
 Closing the window keeps Luna running in the tray. Use **Quit Luna** from the tray menu to exit.
 

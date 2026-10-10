@@ -22,4 +22,8 @@ voice: string,
 /**
  * Changed only from the Local and Cloud control, never by saving the form.
  */
-inference: InferenceMode, cloudProvider: CloudProvider, openaiModel: string, anthropicModel: string, };
+inference: InferenceMode, 
+/**
+ * Where spoken requests are transcribed. Changed only from its own control.
+ */
+speechRecognition: InferenceMode, cloudProvider: CloudProvider, openaiModel: string, anthropicModel: string, };

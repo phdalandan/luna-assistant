@@ -8,8 +8,12 @@ use tauri::{AppHandle, Manager};
 use crate::assistant::{self, Relevance};
 use crate::commands::AppState;
 use crate::error::AppError;
+use crate::settings::InferenceMode;
 use crate::settings::{self, Settings};
-use crate::voice::{self, CaptureError, Host, Timing, VoiceError, VoiceSettings, VoiceState};
+use crate::voice::{
+    self, CaptureError, Host, SAMPLE_RATE, Timing, TranscriptionFailed, VoiceError, VoiceSettings,
+    VoiceState,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[cfg_attr(test, derive(ts_rs::TS), ts(export))]
@@ -106,6 +110,20 @@ impl Host for VoiceHost {
         assistant::vocabulary(&state.home_assistant.cache().read())
     }
 
+    fn transcribe(&self, samples: &[f32]) -> Result<String, TranscriptionFailed> {
+        let state = self.app.state::<AppState>();
+        let vocabulary = self.vocabulary();
+        let prompt = voice::vocabulary_prompt(&vocabulary);
+        tauri::async_runtime::block_on(state.transcribe(samples, SAMPLE_RATE, prompt)).map_err(
+            |error| {
+                log::error!("cloud transcription failed: {error}");
+                TranscriptionFailed {
+                    reply: error.user_message(),
+                }
+            },
+        )
+    }
+
     fn cancel(&self) {
         self.app.state::<AppState>().cancel_request();
     }
@@ -194,6 +212,7 @@ pub fn start(app: &AppHandle) -> Result<(), AppError> {
                 wake_word: saved.wake_word,
                 voice: saved.voice,
                 helper,
+                cloud_transcription: saved.speech_recognition == InferenceMode::Cloud,
             };
             let host = Arc::new(VoiceHost { app: app.clone() });
             state.voice.start(files, settings, Timing::default(), host)
