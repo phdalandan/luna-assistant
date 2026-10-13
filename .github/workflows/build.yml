@@ -122,7 +122,7 @@ jobs:
 
       - name: Restore llama.cpp runtime
         id: runtime-cache
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: src-tauri/binaries
           key: llama-server-${{ matrix.target }}-${{ hashFiles('scripts/build-llama-server.sh') }}
@@ -138,6 +138,14 @@ jobs:
           extension=""
           [ "${{ matrix.bundle }}" = "nsis" ] && extension=".exe"
           "src-tauri/binaries/llama-server-${{ matrix.target }}$extension" --version
+
+      # Saved now so a later failure does not throw away the long llama.cpp build.
+      - name: Save llama.cpp runtime
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: src-tauri/binaries
+          key: ${{ steps.runtime-cache.outputs.cache-primary-key }}
 
       - name: Fetch sherpa-onnx libraries
         run: node scripts/fetch-sherpa-onnx.mjs "${{ matrix.target }}"
@@ -210,7 +218,8 @@ jobs:
       - name: Collect installer
         run: |
           dir="src-tauri/target/${{ matrix.target }}/release/bundle/${{ matrix.bundle }}"
-          mapfile -t files < <(find "$dir" -maxdepth 1 -name "${{ matrix.pattern }}")
+          shopt -s nullglob
+          files=("$dir"/${{ matrix.pattern }})
           if [ "${#files[@]}" -ne 1 ]; then
             echo "::error::Expected one installer in $dir, found ${#files[@]}."
             exit 1

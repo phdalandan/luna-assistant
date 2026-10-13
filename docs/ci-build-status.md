@@ -1,6 +1,6 @@
 # CI build status
 
-State of `.github/workflows/build.yml` as of 2026-10-10. The workflow runs only on `workflow_dispatch`, and every run costs GitHub minutes. Verify locally whatever you can before asking for a run.
+State of `.github/workflows/build.yml` as of 2026-10-13. The workflow runs only on `workflow_dispatch`, and every run costs GitHub minutes. Verify locally whatever you can before asking for a run.
 
 ## Runs so far
 
@@ -9,6 +9,7 @@ State of `.github/workflows/build.yml` as of 2026-10-10. The workflow runs only 
 | #1  | Cancelled                                                                | Not investigated.                                                          |
 | #2  | Failed on both platforms at "Lint Rust"                                  | Clippy 1.99 `chunks_exact_to_as_chunks` in `src-tauri/src/voice/speak.rs`. |
 | #3  | Windows failed at "Check generated TypeScript bindings", macOS cancelled | All 18 files in `src/bindings` reported as modified on Windows.            |
+| #4  | Windows passed, macOS failed at "Collect installer"                      | `mapfile` does not exist in the Bash 3.2 that macOS ships.                 |
 
 ## Fixed
 
@@ -16,19 +17,15 @@ State of `.github/workflows/build.yml` as of 2026-10-10. The workflow runs only 
 - **Bindings check (`c3b480d`).** Windows runners check out with `core.autocrlf=true`, so the files arrive with CRLF line endings. ts-rs then rewrites them with LF, and `git status` reports them as modified. The fix is `.gitattributes`: `src/bindings/** text eol=lf`.
   - Reproduced on macOS by cloning with `-c core.autocrlf=true` and copying in the LF bindings: every file showed as modified.
   - With `.gitattributes` in place, the same test showed nothing modified.
-  - Not yet confirmed on a Windows runner.
+  - Confirmed on a Windows runner in run #4.
+- **Collect installer.** Replaced `mapfile` with a `nullglob` array, which Bash 3.2 supports. Not yet confirmed on a macOS runner.
+- **llama.cpp cache.** `actions/cache` only saves when the whole job succeeds, so every failed macOS run rebuilt llama.cpp from source (about 25 minutes). The runtime is now saved right after it is built and checked, so later failures keep it.
 
 ## Not yet verified
 
-These steps have never run in CI on either platform, because every run so far failed or was cancelled before reaching them:
-
+- Collect installer and upload artifact on macOS. Run #4 passed them on Windows.
 - Import Windows signing certificate (only runs when the `WINDOWS_CERTIFICATE` secret is set)
-- Build installer (`npx tauri build`)
-- Collect installer
-- Upload artifact
 - Create draft release
-
-Nothing in this list has been tested. Their behaviour on Windows can only be confirmed by a Windows run.
 
 ## Local checks before a run
 
